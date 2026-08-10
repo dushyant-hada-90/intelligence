@@ -2,11 +2,12 @@
 
 Chrome MV3 extension (MAIN world) that:
 
-1. Intercepts Instagram Reels GraphQL / embedded Relay metadata
+1. Intercepts Instagram Reels GraphQL / embedded Relay metadata (caches slim fields in memory)
 2. POSTs each **new reel batch** to the local FastAPI decision server (`POST /reels`)
 3. Watches each reel for the server’s `duration` seconds
-4. Performs `action` (`like` | `save` | none) and optional `comment` independently
-5. Scrolls to the next reel
+4. After a reel is **watched**, POSTs that reel to `POST /reels/ingest` (Supabase) — prefetched-but-unwatched reels are never stored
+5. Performs `action` (`like` | `save` | none) and optional `comment` independently
+6. Scrolls to the next reel; releases per-reel memory after finish
 
 ## Setup
 

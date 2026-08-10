@@ -1,4 +1,4 @@
-"""FastAPI reel decision server — watch duration + engage actions per batch."""
+"""FastAPI reel decision + ingest server."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import logging
 import random
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+from db import upsert_reels
 
 # Keep in sync with reel-timing-extension content-script.js API_BASE_URL
 SERVER_PORT = 7860
@@ -65,6 +67,16 @@ class ReelResponse(BaseModel):
     duration: float
 
 
+class ReelIngestItem(BaseModel):
+    id: str
+    username: str = "unknown"
+    music: Optional[str] = None
+    # null = like count hidden/unknown (IG like_and_view_counts_disabled)
+    likes: Optional[int] = None
+    comments: int = 0
+    reposts: int = 0
+
+
 COMMENT_POOL = ["Great reel!", "Nice one.", "hii", "Fire 🔥"]
 
 
@@ -86,6 +98,27 @@ def decide_for_reel(reel_id: str) -> ReelResponse:
     )
 
 
+def normalize_ingest_rows(reels: List[ReelIngestItem]) -> List[dict]:
+    """Trim ids, default username, clamp counts, dedupe by id (last wins)."""
+    by_id: dict[str, dict] = {}
+    for reel in reels:
+        rid = (reel.id or "").strip()
+        if not rid:
+            continue
+        username = (reel.username or "").strip() or "unknown"
+        music = reel.music.strip() if isinstance(reel.music, str) and reel.music.strip() else None
+        likes = None if reel.likes is None else max(0, int(reel.likes))
+        by_id[rid] = {
+            "id": rid,
+            "username": username,
+            "music": music,
+            "likes": likes,
+            "comments": max(0, int(reel.comments or 0)),
+            "reposts": max(0, int(reel.reposts or 0)),
+        }
+    return list(by_id.values())
+
+
 @app.get("/health")
 def health() -> dict:
     return {"ok": True}
@@ -103,6 +136,20 @@ def process_reels(reels: List[ReelMetadata]) -> List[ReelResponse]:
             r.duration,
         )
     return responses
+
+
+@app.post("/reels/ingest")
+def ingest_reels(reels: List[ReelIngestItem]) -> dict:
+    rows = normalize_ingest_rows(reels)
+    if not rows:
+        return {"upserted": 0}
+    try:
+        n = upsert_reels(rows)
+    except Exception as exc:
+        log.exception("ingest upsert failed count=%s", len(rows))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    log.info("ingest upserted=%s", n)
+    return {"upserted": n}
 
 
 if __name__ == "__main__":

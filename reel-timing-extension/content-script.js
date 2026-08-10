@@ -15,10 +15,20 @@
     var PREFIX = "[REEL-TIMING]";
     var CLIPS_EDGES_KEY = "xdt_api__v1__clips__home__connection_v2";
 
-    /** @type {Map<string, { position: number, metadata_seen_at: number, batch_id: number, username: string|null, viewport_entered_at?: number, delta_ms?: number }>} */
+    /**
+     * Slim metadata only (never full GraphQL media).
+     * Ingest fields (music/likes/…) are cached here until the bot watches, then POSTed + released.
+     * @type {Map<string, object>}
+     */
     var reelMetadataMap = new Map();
-    /** @type {string[]} append-only global order for positional correlation */
+    /** @type {string[]} global order for username FIFO correlation (compacted by prune) */
     var orderedReelIds = [];
+    /** Soft caps so long sessions do not retain unbounded prefetch / done state. */
+    var MAX_REEL_METADATA = 80;
+    var MAX_DONE_TRACK = 300;
+    var MAX_OBSERVED_CONTAINERS = 40;
+    /** Ring of done reel ids (evicts oldest keys from autopilotDoneIds). */
+    var doneIdRing = [];
     /** @type {Element[]} accepted reel containers in discovery order */
     var observedContainers = [];
     /** Stable index assigned at first accept (survives virtualized unmount). */
@@ -841,9 +851,267 @@
       }
     }
 
+    function numOrZero(value) {
+      var n = Number(value);
+      if (!isFinite(n) || n < 0) {
+        return 0;
+      }
+      return Math.floor(n);
+    }
+
+    /** likes / comments / reposts from GraphQL media (Instagram.html paths). */
+    function extractCounts(media) {
+      if (!media || typeof media !== "object") {
+        return { likes: 0, comments: 0, reposts: 0 };
+      }
+      var reposts = media.media_repost_count;
+      if (reposts == null) {
+        reposts = media.repost_count;
+      }
+      // When IG hides like/view counts, like_count is unreliable (often a stub) — store null.
+      var likesHidden = media.like_and_view_counts_disabled === true;
+      return {
+        likes: likesHidden ? null : numOrZero(media.like_count),
+        comments: numOrZero(media.comment_count),
+        reposts: numOrZero(reposts),
+      };
+    }
+
     /**
-     * Normalize a clips edge into { code, username } or null.
+     * Music label from clips_metadata.
+     * Prefer licensed music_info; else original_sound_info title + @artist.
+     */
+    function extractMusic(media) {
+      try {
+        var cm = media && media.clips_metadata;
+        if (!cm || typeof cm !== "object") {
+          return null;
+        }
+
+        var mi = cm.music_info;
+        if (mi && typeof mi === "object") {
+          var asset = mi.music_asset_info || mi;
+          var title =
+            (asset && (asset.title || asset.music_title)) || null;
+          var artist =
+            (asset && (asset.display_artist || asset.artist_name)) || null;
+          if (title && artist) {
+            return String(title) + " · " + String(artist);
+          }
+          if (title) {
+            return String(title);
+          }
+          if (artist) {
+            return String(artist);
+          }
+        }
+
+        var os = cm.original_sound_info;
+        if (os && typeof os === "object") {
+          var t =
+            typeof os.original_audio_title === "string" && os.original_audio_title
+              ? os.original_audio_title
+              : null;
+          var u =
+            os.ig_artist && typeof os.ig_artist.username === "string"
+              ? os.ig_artist.username
+              : null;
+          if (t && u) {
+            return t + " · @" + u;
+          }
+          if (t) {
+            return t;
+          }
+          if (u) {
+            return "Original audio · @" + u;
+          }
+        }
+        return null;
+      } catch (_err) {
+        return null;
+      }
+    }
+
+    /** Extract slim ingest fields from transient GraphQL media (do not retain media). */
+    function ingestFieldsFromMedia(media, username) {
+      var counts = extractCounts(media);
+      return {
+        username: username || "unknown",
+        music: extractMusic(media),
+        likes: counts.likes,
+        comments: counts.comments,
+        reposts: counts.reposts,
+      };
+    }
+
+    function buildIngestRowFromMeta(reelId) {
+      var meta = reelMetadataMap.get(reelId);
+      if (!meta) {
+        return null;
+      }
+      return {
+        id: reelId,
+        username: meta.username || "unknown",
+        music: meta.music != null ? meta.music : null,
+        likes: meta.likes == null ? null : numOrZero(meta.likes),
+        comments: numOrZero(meta.comments),
+        reposts: numOrZero(meta.reposts),
+      };
+    }
+
+    /**
+     * Fire-and-forget persist. Rows must already be plain copies (safe after memory release).
+     */
+    function requestIngestBatch(rows) {
+      if (!rows || !rows.length) {
+        return Promise.resolve();
+      }
+      var base = getApiBaseUrl();
+      if (!base) {
+        return Promise.resolve();
+      }
+      return extensionApiPost("/reels/ingest", rows, 15000)
+        .then(function (data) {
+          var n =
+            data && typeof data.upserted === "number"
+              ? data.upserted
+              : rows.length;
+          logBot("INGEST_OK upserted=" + n + " sent=" + rows.length);
+        })
+        .catch(function (err) {
+          warn(
+            "WARN ingest failed: " + ((err && err.message) || String(err))
+          );
+        });
+    }
+
+    function markAutopilotDone(reelId) {
+      if (!reelId || autopilotDoneIds[reelId]) {
+        return;
+      }
+      autopilotDoneIds[reelId] = true;
+      doneIdRing.push(reelId);
+      while (doneIdRing.length > MAX_DONE_TRACK) {
+        var old = doneIdRing.shift();
+        if (old && old !== reelId) {
+          delete autopilotDoneIds[old];
+        }
+      }
+    }
+
+    /** Drop per-reel heavy state after watch/skip. Keeps done marker only. */
+    function releaseReelMemory(reelId) {
+      if (!reelId) {
+        return;
+      }
+      delete autopilotQueuedIds[reelId];
+      reelMetadataMap.delete(reelId);
+      reelDecisionMap.delete(reelId);
+      reelRunLog.delete(reelId);
+      delete decisionFetchIds[reelId];
+    }
+
+    /**
+     * Compact ordered ids + evict oldest never-watched prefetch when over cap.
+     * Never drops the current job or queued reels.
+     */
+    function pruneReelCaches() {
+      try {
+        var currentId =
+          currentAutopilotReel && currentAutopilotReel.reelId
+            ? currentAutopilotReel.reelId
+            : null;
+
+        // Compact ordered list to codes still in the map.
+        if (orderedReelIds.length > reelMetadataMap.size) {
+          var compacted = [];
+          for (var c = 0; c < orderedReelIds.length; c++) {
+            if (reelMetadataMap.has(orderedReelIds[c])) {
+              compacted.push(orderedReelIds[c]);
+            }
+          }
+          orderedReelIds = compacted;
+        }
+
+        while (reelMetadataMap.size > MAX_REEL_METADATA && orderedReelIds.length) {
+          var victim = null;
+          for (var i = 0; i < orderedReelIds.length; i++) {
+            var code = orderedReelIds[i];
+            if (!reelMetadataMap.has(code)) {
+              continue;
+            }
+            if (code === currentId || autopilotQueuedIds[code]) {
+              continue;
+            }
+            // Prefer done leftovers, then oldest never-viewport (unwatched prefetch).
+            var meta = reelMetadataMap.get(code);
+            if (autopilotDoneIds[code]) {
+              victim = code;
+              break;
+            }
+            if (meta && typeof meta.viewport_entered_at !== "number") {
+              victim = code;
+              break;
+            }
+          }
+          if (!victim) {
+            break;
+          }
+          releaseReelMemory(victim);
+          orderedReelIds = orderedReelIds.filter(function (id) {
+            return id !== victim;
+          });
+        }
+
+        if (viewportReelOrder.length > MAX_DONE_TRACK) {
+          viewportReelOrder = viewportReelOrder.slice(-MAX_DONE_TRACK);
+        }
+
+        if (observedContainers.length > MAX_OBSERVED_CONTAINERS) {
+          var kept = [];
+          for (var o = 0; o < observedContainers.length; o++) {
+            var el = observedContainers[o];
+            if (el && el.isConnected) {
+              kept.push(el);
+            }
+          }
+          observedContainers =
+            kept.length > MAX_OBSERVED_CONTAINERS
+              ? kept.slice(-MAX_OBSERVED_CONTAINERS)
+              : kept;
+        }
+
+        if (pendingViewports.length > 20) {
+          pendingViewports = pendingViewports.slice(-20);
+        }
+      } catch (_pruneErr) {
+        /* ignore */
+      }
+    }
+
+    /**
+     * After the bot finishes a reel: optionally ingest (watched only), then free memory.
+     * Builds the row before release so the POST does not need the map entry.
+     */
+    function finishAutopilotReel(reelId, watched) {
+      var row = null;
+      if (watched) {
+        row = buildIngestRowFromMeta(reelId);
+      }
+      markAutopilotDone(reelId);
+      releaseReelMemory(reelId);
+      pruneReelCaches();
+      if (row) {
+        requestIngestBatch([row]);
+      } else if (watched) {
+        warn("WARN ingest skipped — no cached metadata reel_id=" + reelId);
+      }
+    }
+
+    /**
+     * Normalize a clips edge into { code, username, media } or null.
      * Ads / netego / placeholders often have null media or no shortcode — skip silently.
+     * `media` is transient for ingest field extraction — do not store it in reelMetadataMap.
      */
     function extractReelFromEdge(edge) {
       try {
@@ -918,7 +1186,25 @@
           reelEdges.push(extracted);
         }
 
-        // Pre-scan: skip batches that are entirely duplicates (HTML + later /graphql).
+        // Cache slim ingest fields in memory only — Supabase write happens after watch.
+        // Refresh music/counts on re-seen edges so watch-time ingest is up to date.
+        for (var ir = 0; ir < reelEdges.length; ir++) {
+          var edgeEx = reelEdges[ir];
+          var fields = ingestFieldsFromMedia(edgeEx.media, edgeEx.username);
+          // Drop heavy GraphQL media reference ASAP; keep slim copy on the edge.
+          edgeEx.media = null;
+          edgeEx.ingestFields = fields;
+          var existing = reelMetadataMap.get(edgeEx.code);
+          if (existing) {
+            existing.username = fields.username || existing.username || null;
+            existing.music = fields.music;
+            existing.likes = fields.likes;
+            existing.comments = fields.comments;
+            existing.reposts = fields.reposts;
+          }
+        }
+
+        // Pre-scan: skip decision/metadata work when batch is entirely duplicates.
         var newReels = [];
         for (var pre = 0; pre < reelEdges.length; pre++) {
           if (!reelMetadataMap.has(reelEdges[pre].code)) {
@@ -926,6 +1212,7 @@
           }
         }
         if (!newReels.length) {
+          pruneReelCaches();
           flushPendingViewportMatches();
           return;
         }
@@ -963,7 +1250,11 @@
               continue;
             }
 
-            var username = reel.username;
+            var fieldsNew =
+              reel.ingestFields ||
+              ingestFieldsFromMedia(reel.media, reel.username);
+            reel.media = null;
+            var username = fieldsNew.username || reel.username || null;
             var metadataSeenAt = performance.now();
             // Global append order — same index used by VIEWPORT_ENTERED / validation table.
             var globalPosition = orderedReelIds.length;
@@ -973,6 +1264,10 @@
               metadata_seen_at: metadataSeenAt,
               batch_id: batchId,
               username: username,
+              music: fieldsNew.music,
+              likes: fieldsNew.likes,
+              comments: fieldsNew.comments,
+              reposts: fieldsNew.reposts,
             });
             orderedReelIds.push(code);
 
@@ -999,6 +1294,7 @@
           batchCodes.push(newReels[b].code);
         }
         requestDecisionsForBatch(batchCodes);
+        pruneReelCaches();
 
         // Viewport often fires before network GraphQL on deep-linked /reels/<code>/ pages.
         flushPendingViewportMatches();
@@ -2438,6 +2734,132 @@
       }
     }
 
+    function isComposerFocused(inputEl) {
+      try {
+        if (!inputEl) {
+          return false;
+        }
+        var active = document.activeElement;
+        if (!active) {
+          return false;
+        }
+        return (
+          active === inputEl ||
+          inputEl.contains(active) ||
+          active.contains(inputEl)
+        );
+      } catch (_err) {
+        return false;
+      }
+    }
+
+    /** Place caret at end so IG treats the composer as actively editing. */
+    function placeComposerCaret(inputEl) {
+      try {
+        if (!inputEl) {
+          return;
+        }
+        if (inputEl.isContentEditable) {
+          var range = document.createRange();
+          range.selectNodeContents(inputEl);
+          range.collapse(false);
+          var sel = window.getSelection();
+          if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          return;
+        }
+        if (typeof inputEl.setSelectionRange === "function") {
+          var len = String(inputEl.value || "").length;
+          inputEl.setSelectionRange(len, len);
+        }
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+
+    /**
+     * Ensure the comment textbox actually has focus before type / Enter / Post.
+     * Without this, text can appear while IG never enables Post (and Enter is ignored).
+     */
+    async function focusComposerInput(inputEl, opts) {
+      var withClick = !opts || opts.click !== false;
+      if (!inputEl || !inputEl.isConnected) {
+        return false;
+      }
+      try {
+        if (typeof window.focus === "function") {
+          window.focus();
+        }
+      } catch (_wf) {
+        /* ignore */
+      }
+
+      if (withClick) {
+        humanPointerClick(inputEl);
+        await sleep(randBetween(120, 280));
+      }
+
+      try {
+        inputEl.focus({ preventScroll: true });
+      } catch (_f1) {
+        try {
+          inputEl.focus();
+        } catch (_f2) {
+          /* ignore */
+        }
+      }
+
+      try {
+        inputEl.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+        inputEl.dispatchEvent(new FocusEvent("focus", { bubbles: false }));
+      } catch (_fe) {
+        /* ignore */
+      }
+
+      placeComposerCaret(inputEl);
+      await sleep(randBetween(80, 180));
+
+      if (isComposerFocused(inputEl)) {
+        return true;
+      }
+
+      // Second try: click again then focus (dialogs sometimes steal focus once).
+      humanPointerClick(inputEl);
+      await sleep(randBetween(150, 320));
+      try {
+        inputEl.focus();
+      } catch (_f3) {
+        /* ignore */
+      }
+      placeComposerCaret(inputEl);
+      await sleep(100);
+      return isComposerFocused(inputEl);
+    }
+
+    /**
+     * Re-focus + re-fire input so Instagram enables the Post control after typing.
+     */
+    async function nudgeComposerForPost(getInputFn) {
+      var inputEl = typeof getInputFn === "function" ? getInputFn() : getInputFn;
+      if (!inputEl) {
+        return false;
+      }
+      var focused = await focusComposerInput(inputEl, { click: true });
+      inputEl = typeof getInputFn === "function" ? getInputFn() : inputEl;
+      if (!inputEl) {
+        return false;
+      }
+      var text = getComposerText(inputEl);
+      if (text) {
+        dispatchInputEvents(inputEl, text, "insertText");
+      }
+      placeComposerCaret(inputEl);
+      await sleep(randBetween(200, 450));
+      return focused || isComposerFocused(inputEl);
+    }
+
     function dispatchInputEvents(inputEl, data, inputType) {
       try {
         if (typeof InputEvent === "function") {
@@ -2465,6 +2887,7 @@
     /**
      * Type into Instagram's comment <input>. Re-queries node each char (remounts),
      * tries insertText / native setter / InputEvent, verifies final value.
+     * Keeps the composer focused — required for Post to appear.
      */
     async function typeIntoInputHuman(getInputFn, text) {
       var inputEl = typeof getInputFn === "function" ? getInputFn() : getInputFn;
@@ -2472,19 +2895,15 @@
         return false;
       }
 
-      humanPointerClick(inputEl);
-      try {
-        inputEl.focus();
-      } catch (_f) {
-        /* ignore */
-      }
-      await sleep(randBetween(300, 700));
+      await focusComposerInput(inputEl, { click: true });
+      await sleep(randBetween(200, 500));
 
       // Clear
       inputEl = typeof getInputFn === "function" ? getInputFn() : inputEl;
       if (!inputEl) {
         return false;
       }
+      await focusComposerInput(inputEl, { click: false });
       try {
         if (inputEl.isContentEditable) {
           inputEl.textContent = "";
@@ -2502,10 +2921,15 @@
         if (!inputEl) {
           return false;
         }
-        try {
-          inputEl.focus();
-        } catch (_ff) {
-          /* ignore */
+        if (!isComposerFocused(inputEl)) {
+          await focusComposerInput(inputEl, { click: true });
+        } else {
+          try {
+            inputEl.focus();
+          } catch (_ff) {
+            /* ignore */
+          }
+          placeComposerCaret(inputEl);
         }
 
         var keyOpts = {
@@ -2548,16 +2972,17 @@
       inputEl = typeof getInputFn === "function" ? getInputFn() : inputEl;
       var finalText = getComposerText(inputEl);
       if (finalText.indexOf(text) === -1) {
-        // Last-resort bulk set + input event
+        // Last-resort bulk set + input event (still under focus)
         try {
           if (inputEl) {
+            await focusComposerInput(inputEl, { click: true });
             if (inputEl.isContentEditable) {
-              inputEl.focus();
               inputEl.textContent = text;
             } else {
               setNativeInputValue(inputEl, text);
             }
             dispatchInputEvents(inputEl, text, "insertText");
+            placeComposerCaret(inputEl);
           }
         } catch (_bulk) {
           /* ignore */
@@ -3047,24 +3472,39 @@
           " text=" +
           text
       );
-      await sleep(randBetween(500, 1200));
+      await sleep(randBetween(400, 900));
+
+      // Focus + nudge before looking for Post — unfocused composers show text but no Post.
+      await nudgeComposerForPost(liveInput);
 
       var live = findLiveCommentComposer();
       var dialog = live ? live.dialog : opened.dialog;
-      var postBtn = await waitForPostButton(dialog, 6000);
+      var postBtn = await waitForPostButton(dialog, 5000);
+
+      if (!postBtn) {
+        // One more focus/nudge cycle; IG sometimes enables Post only after re-focus.
+        await nudgeComposerForPost(liveInput);
+        live = findLiveCommentComposer();
+        dialog = live ? live.dialog : dialog;
+        postBtn = await waitForPostButton(dialog, 3500);
+      }
 
       if (postBtn) {
+        // Ensure composer still focused first (some builds ignore Post while blurry).
+        var prePost = liveInput();
+        if (prePost) {
+          await focusComposerInput(prePost, { click: false });
+        }
         humanPointerClick(postBtn);
         logBot("COMMENT_POST_CLICKED reel_id=" + reelId + " index=" + index);
       } else {
-        // Fallback Enter on live input
+        // Fallback Enter only works if the textbox is the active element.
         var input = liveInput();
         if (input) {
-          try {
-            input.focus();
-          } catch (_f) {
-            /* ignore */
-          }
+          await focusComposerInput(input, { click: true });
+          input = liveInput() || input;
+          placeComposerCaret(input);
+          await sleep(randBetween(120, 280));
           var enterOpts = {
             key: "Enter",
             code: "Enter",
@@ -3374,7 +3814,8 @@
               saved: false,
               commented: false,
             });
-            autopilotDoneIds[job.reelId] = true;
+            // Not watched — do not ingest; free memory.
+            finishAutopilotReel(job.reelId, false);
             previousId = job.reelId;
             currentAutopilotReel = null;
             await scrollToNextReelHuman();
@@ -3421,7 +3862,8 @@
             });
             var obsLost = (reelRunLog.get(job.reelId) || {}).observed || {};
             logReelResult(job, decision, obsLost);
-            autopilotDoneIds[job.reelId] = true;
+            // Watch completed — ingest then free memory.
+            finishAutopilotReel(job.reelId, true);
             previousId = job.reelId;
             currentAutopilotReel = null;
             await scrollToNextReelHuman();
@@ -3462,7 +3904,8 @@
             }
           }
 
-          autopilotDoneIds[job.reelId] = true;
+          // Strict: Supabase only gets reels the bot actually watched.
+          finishAutopilotReel(job.reelId, true);
           await sleep(randBetween(800, 1600));
           previousId = job.reelId;
           currentAutopilotReel = null;
