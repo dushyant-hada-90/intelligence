@@ -18,7 +18,7 @@ from typing import Callable, List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from nova_hook import analyze_hook_with_nova
+from nova import analyze_hook_with_nova
 from usage_costs import build_usage_report, whisper_usage_block
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -326,7 +326,7 @@ def analyze_reel_url(url: str, progress: ProgressCb = None) -> tuple[dict, Path]
 
 def main() -> None:
     if len(sys.argv) <= 1:
-        print("Usage: python hook_test.py <instagram_reel_url|local_video_path>")
+        print("Usage: python hook_pipeline.py <instagram_reel_url|local_video_path>")
         print("API: uvicorn app:app --host 127.0.0.1 --port 7860")
         sys.exit(1)
 

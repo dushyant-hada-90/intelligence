@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Hook API — Dev Tester</title>
+  <title>Reel Intelligence — Dev Tester</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -39,6 +39,7 @@
       font-size: 14px;
     }
     h1 { font-size: 1.5rem; margin: 0 0 8px; font-weight: 650; }
+    h2 { font-size: 1.15rem; margin: 0 0 8px; font-weight: 650; }
     p.lead { color: var(--muted); margin: 0 0 20px; }
     label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
     input[type="url"], input[type="text"] {
@@ -61,6 +62,18 @@
       cursor: pointer;
     }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+    .tab {
+      background: #2a3340;
+      color: var(--muted);
+    }
+    .tab.active { background: var(--accent); color: #fff; }
+    .panel { display: none; }
+    .panel.active { display: block; }
     .meta {
       margin-top: 18px;
       padding: 14px;
@@ -162,6 +175,42 @@
       margin-right: 6px;
       vertical-align: middle;
     }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 8px 0 14px;
+    }
+    .chip {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #2a3340;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .reel-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .reel-card {
+      background: var(--panel);
+      border: 1px solid #2c3848;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .reel-card img {
+      width: 100%;
+      aspect-ratio: 9/16;
+      object-fit: cover;
+      background: #0b0f14;
+      display: block;
+    }
+    .reel-card .body { padding: 10px 12px 12px; font-size: 13px; }
+    .reel-card a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .reel-card .muted { color: var(--muted); font-size: 12px; margin-top: 4px; }
     pre {
       margin-top: 16px;
       padding: 14px;
@@ -172,53 +221,103 @@
       font-size: 12px;
       max-height: 360px;
     }
+    .shared-key { margin-bottom: 18px; }
   </style>
 </head>
 <body>
   <main>
     <div class="banner">
       Developer only — not for production. Set <code>DEV_UI=0</code> to disable this page.
-      Red marks on the timeline are PySceneDetect shot cuts.
+      Instagram keyword search is rate-limited (1 at a time); discover jobs can take a while.
     </div>
-    <h1>Reel Hook Analyzer (Nova)</h1>
-    <p class="lead">Paste an Instagram reel URL. Shows the downloaded reel, cut marks, cost, and JSON.</p>
+    <h1>Reel Intelligence (Dev)</h1>
+    <p class="lead">Hook analyzer (Nova) and website → trending reels discover.</p>
 
-    <label for="url">Instagram Reel URL</label>
-    <input id="url" type="url" placeholder="https://www.instagram.com/reel/XXXX/" />
-
-    <label for="apiKey" style="margin-top:12px">X-API-Key (only if API_KEY is set in .env)</label>
-    <input id="apiKey" type="text" placeholder="optional" autocomplete="off" />
-
-    <div class="row">
-      <button id="go" type="button">Analyze</button>
+    <div class="shared-key">
+      <label for="apiKey">X-API-Key (only if API_KEY is set in .env)</label>
+      <input id="apiKey" type="text" placeholder="optional" autocomplete="off" />
     </div>
 
-    <div class="meta" id="meta" hidden>
-      <dl>
-        <dt>Job ID</dt>
-        <dd id="jobId">—</dd>
-        <dt>Status</dt>
-        <dd id="status">—</dd>
-        <dt>Cost (USD)</dt>
-        <dd id="cost">—</dd>
-        <dt>Cuts</dt>
-        <dd id="cutsSummary">—</dd>
-        <dt>Verdict</dt>
-        <dd class="verdict" id="verdict">—</dd>
-      </dl>
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="hooks">Hooks</button>
+      <button type="button" class="tab" data-tab="discover">Discover</button>
     </div>
 
-    <div class="player-wrap" id="playerWrap">
-      <video id="player" controls playsinline></video>
-      <div class="timeline-label" id="timelineLabel">Shot-cut timeline</div>
-      <div class="timeline" id="timeline" title="Click to seek">
-        <div class="timeline-progress" id="progress"></div>
-        <div class="timeline-playhead" id="playhead"></div>
+    <section id="panel-hooks" class="panel active">
+      <h2>Reel Hook Analyzer (Nova)</h2>
+      <p class="lead">Paste an Instagram reel URL. Shows the downloaded reel, cut marks, cost, and JSON.</p>
+
+      <label for="url">Instagram Reel URL</label>
+      <input id="url" type="url" placeholder="https://www.instagram.com/reel/XXXX/" />
+
+      <div class="row">
+        <button id="go" type="button">Analyze</button>
       </div>
-      <div class="cut-chips" id="chips"></div>
-    </div>
 
-    <pre id="out">Waiting…</pre>
+      <div class="meta" id="meta" hidden>
+        <dl>
+          <dt>Job ID</dt>
+          <dd id="jobId">—</dd>
+          <dt>Status</dt>
+          <dd id="status">—</dd>
+          <dt>Cost (USD)</dt>
+          <dd id="cost">—</dd>
+          <dt>Cuts</dt>
+          <dd id="cutsSummary">—</dd>
+          <dt>Verdict</dt>
+          <dd class="verdict" id="verdict">—</dd>
+        </dl>
+      </div>
+
+      <div class="player-wrap" id="playerWrap">
+        <video id="player" controls playsinline></video>
+        <div class="timeline-label" id="timelineLabel">Shot-cut timeline</div>
+        <div class="timeline" id="timeline" title="Click to seek">
+          <div class="timeline-progress" id="progress"></div>
+          <div class="timeline-playhead" id="playhead"></div>
+        </div>
+        <div class="cut-chips" id="chips"></div>
+      </div>
+
+      <pre id="out">Waiting…</pre>
+    </section>
+
+    <section id="panel-discover" class="panel">
+      <h2>Website → Reel Discover</h2>
+      <p class="lead">Paste a business landing page URL. Scrapes the site, generates IG keyword queries, ranks reels by engagement + recency.</p>
+
+      <label for="siteUrl">Website URL</label>
+      <input id="siteUrl" type="url" placeholder="https://example.com/" />
+
+      <div class="row">
+        <button id="discoverGo" type="button">Discover</button>
+      </div>
+
+      <div class="meta" id="discoverMeta" hidden>
+        <dl>
+          <dt>Job ID</dt>
+          <dd id="discoverJobId">—</dd>
+          <dt>Status</dt>
+          <dd id="discoverStatus">—</dd>
+          <dt>Cost (USD)</dt>
+          <dd id="discoverCost">—</dd>
+          <dt>Site</dt>
+          <dd id="discoverSite">—</dd>
+          <dt>Warnings</dt>
+          <dd id="discoverWarnings">—</dd>
+        </dl>
+      </div>
+
+      <div id="discoverTagsWrap" hidden>
+        <label>Tags</label>
+        <div class="chips" id="discoverTags"></div>
+        <label>Queries</label>
+        <div class="chips" id="discoverQueries"></div>
+      </div>
+
+      <div class="reel-grid" id="reelGrid"></div>
+      <pre id="discoverOut">Waiting…</pre>
+    </section>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
@@ -226,6 +325,15 @@
     const timeline = $("timeline");
     let cutTimes = [];
     let lastVideoUrl = null;
+
+    document.querySelectorAll(".tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+        btn.classList.add("active");
+        $("panel-" + btn.dataset.tab).classList.add("active");
+      });
+    });
 
     const headers = () => {
       const h = { "Content-Type": "application/json" };
@@ -241,6 +349,13 @@
 
     async function poll(jobId) {
       const res = await fetch(`/v1/hooks/jobs/${jobId}`, { headers: headers() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      return data;
+    }
+
+    async function pollDiscover(jobId) {
+      const res = await fetch(`/v1/discover/jobs/${jobId}`, { headers: headers() });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || res.statusText);
       return data;
@@ -363,6 +478,67 @@
       $("out").textContent = JSON.stringify(job, null, 2);
     }
 
+    function chipList(el, items) {
+      el.innerHTML = "";
+      (items || []).forEach((t) => {
+        const span = document.createElement("span");
+        span.className = "chip";
+        span.textContent = t;
+        el.appendChild(span);
+      });
+    }
+
+    function renderDiscover(job) {
+      $("discoverMeta").hidden = false;
+      $("discoverJobId").textContent = job.job_id;
+      const st = job.status || "—";
+      $("discoverStatus").textContent = st;
+      $("discoverStatus").className = "status-" + st;
+      $("discoverCost").textContent =
+        job.cost_usd != null ? Number(job.cost_usd).toFixed(6) : "—";
+
+      const result = job.result || {};
+      const site = result.website || {};
+      $("discoverSite").textContent = site.title
+        ? `${site.title} · ${site.final_url || site.url || ""}`
+        : (site.url || "…");
+
+      const warnings = result.warnings || [];
+      $("discoverWarnings").textContent = warnings.length ? warnings.join(" | ") : "none";
+
+      if (job.status === "completed") {
+        $("discoverTagsWrap").hidden = false;
+        chipList($("discoverTags"), result.tags || []);
+        chipList($("discoverQueries"), result.queries || []);
+        const grid = $("reelGrid");
+        grid.innerHTML = "";
+        (result.reels || []).forEach((r, i) => {
+          const card = document.createElement("article");
+          card.className = "reel-card";
+          const eng =
+            r.view_count != null
+              ? `${r.view_count} views`
+              : (r.like_count != null ? `${r.like_count} likes` : "n/a eng");
+          const when = r.taken_at
+            ? new Date(r.taken_at * 1000).toISOString().slice(0, 10)
+            : "—";
+          card.innerHTML = `
+            ${r.thumbnail_url ? `<img src="${r.thumbnail_url}" alt="" loading="lazy" />` : ""}
+            <div class="body">
+              <a href="${r.url}" target="_blank" rel="noopener">#${i + 1} @${r.username || "unknown"}</a>
+              <div class="muted">score ${Number(r.score || 0).toFixed(4)} · ${eng} · ${when}</div>
+              <div class="muted">${(r.caption || "").slice(0, 120)}</div>
+            </div>`;
+          grid.appendChild(card);
+        });
+      } else if (job.status === "failed") {
+        $("discoverTagsWrap").hidden = true;
+        $("reelGrid").innerHTML = "";
+      }
+
+      $("discoverOut").textContent = JSON.stringify(job, null, 2);
+    }
+
     $("go").onclick = async () => {
       const url = $("url").value.trim();
       if (!url) {
@@ -393,6 +569,38 @@
         $("out").textContent = String(err);
       } finally {
         $("go").disabled = false;
+      }
+    };
+
+    $("discoverGo").onclick = async () => {
+      const url = $("siteUrl").value.trim();
+      if (!url) {
+        alert("Paste a website URL");
+        return;
+      }
+      $("discoverGo").disabled = true;
+      $("discoverOut").textContent = "Submitting…";
+      $("reelGrid").innerHTML = "";
+      $("discoverTagsWrap").hidden = true;
+      try {
+        const res = await fetch("/v1/discover/analyze", {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ url }),
+        });
+        const accepted = await res.json();
+        if (!res.ok) throw new Error(accepted.detail || res.statusText);
+        let job = { job_id: accepted.job_id, status: accepted.status };
+        renderDiscover(job);
+        while (job.status === "queued" || job.status === "running") {
+          await new Promise((r) => setTimeout(r, 2000));
+          job = await pollDiscover(accepted.job_id);
+          renderDiscover(job);
+        }
+      } catch (err) {
+        $("discoverOut").textContent = String(err);
+      } finally {
+        $("discoverGo").disabled = false;
       }
     };
   </script>

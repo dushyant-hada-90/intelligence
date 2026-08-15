@@ -1,4 +1,4 @@
-"""Production FastAPI — Nova-first Instagram reel hook analyzer."""
+"""Production FastAPI — Nova hook analyzer + website reel discover."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(BACKEND_DIR / ".env")
 
+from discover_jobs import discover_manager  # noqa: E402
 from jobs import manager  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -31,20 +32,21 @@ STATIC_DIR = BACKEND_DIR / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
-        "Hook API starting DEV_UI=%s max_workers=%s max_queue=%s",
+        "API starting DEV_UI=%s hooks_workers=%s discover_workers=%s",
         DEV_UI,
         manager.max_workers,
-        manager.max_queue_size,
+        discover_manager.max_workers,
     )
     yield
     manager.shutdown()
-    log.info("Hook API shut down")
+    discover_manager.shutdown()
+    log.info("API shut down")
 
 
 app = FastAPI(
-    title="Reel Hook Analyzer API",
-    version="2.0.0",
-    description="Nova-first Instagram reel hook analysis with Whisper + scene cuts.",
+    title="Reel Intelligence API",
+    version="2.1.0",
+    description="Nova-first reel hook analysis + website → Instagram reel discover.",
     lifespan=lifespan,
 )
 
@@ -59,6 +61,10 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="Instagram reel/post URL")
+
+
+class DiscoverRequest(BaseModel):
+    url: str = Field(..., description="Business landing page URL")
 
 
 class AnalyzeAccepted(BaseModel):
@@ -91,6 +97,14 @@ def health() -> dict[str, Any]:
         "ok": True,
         "stack": "nova",
         "dev_ui": DEV_UI,
+        "hooks": {
+            "max_concurrent_jobs": manager.max_workers,
+            "max_queue_size": manager.max_queue_size,
+        },
+        "discover": {
+            "max_concurrent_jobs": discover_manager.max_workers,
+            "max_queue_size": discover_manager.max_queue_size,
+        },
         "max_concurrent_jobs": manager.max_workers,
         "max_queue_size": manager.max_queue_size,
     }
@@ -137,6 +151,27 @@ def get_job_video(
         filename=path.name,
         headers={"Accept-Ranges": "bytes"},
     )
+
+
+@app.post("/v1/discover/analyze", response_model=AnalyzeAccepted)
+def analyze_discover(
+    body: DiscoverRequest, _: None = Depends(require_api_key)
+) -> AnalyzeAccepted:
+    try:
+        job = discover_manager.submit(body.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return AnalyzeAccepted(job_id=job.job_id, status=job.status)
+
+
+@app.get("/v1/discover/jobs/{job_id}")
+def get_discover_job(job_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
+    job = discover_manager.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job.to_dict()
 
 
 @app.get("/dev/")

@@ -4,6 +4,7 @@
 !.env.example
 backend/cookies.txt
 cookies.txt
+temp.js
 
 # Python
 .venv/
