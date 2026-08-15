@@ -200,6 +200,8 @@
       border: 1px solid #2c3848;
       border-radius: 10px;
       overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
     .reel-card img {
       width: 100%;
@@ -208,9 +210,40 @@
       background: #0b0f14;
       display: block;
     }
-    .reel-card .body { padding: 10px 12px 12px; font-size: 13px; }
+    .reel-card .body { padding: 10px 12px 12px; font-size: 13px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
     .reel-card a { color: var(--accent); text-decoration: none; font-weight: 600; }
-    .reel-card .muted { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .reel-card .muted { color: var(--muted); font-size: 12px; }
+    .reel-card .analyze-btn {
+      width: 100%;
+      margin-top: 6px;
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+    .reel-card .analyze-btn.secondary { background: #2a3340; }
+    .reel-analysis {
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #0b0f14;
+      border: 1px solid #2c3848;
+      font-size: 12px;
+      display: none;
+    }
+    .reel-analysis.visible { display: block; }
+    .reel-analysis .analysis-status { color: var(--muted); margin-bottom: 6px; }
+    .reel-analysis .analysis-verdict { font-weight: 650; font-size: 13px; margin-bottom: 6px; }
+    .reel-analysis .analysis-verdict.yes { color: var(--ok); }
+    .reel-analysis .analysis-verdict.no { color: var(--bad); }
+    .reel-analysis .analysis-verdict.pending { color: var(--warn); }
+    .reel-analysis dl { margin: 0; }
+    .reel-analysis dt { color: var(--muted); font-size: 11px; margin-top: 6px; }
+    .reel-analysis dd { margin: 2px 0 0; }
+    .reel-analysis pre {
+      margin: 8px 0 0;
+      max-height: 180px;
+      padding: 8px;
+      font-size: 11px;
+    }
     pre {
       margin-top: 16px;
       padding: 14px;
@@ -513,23 +546,7 @@
         const grid = $("reelGrid");
         grid.innerHTML = "";
         (result.reels || []).forEach((r, i) => {
-          const card = document.createElement("article");
-          card.className = "reel-card";
-          const eng =
-            r.view_count != null
-              ? `${r.view_count} views`
-              : (r.like_count != null ? `${r.like_count} likes` : "n/a eng");
-          const when = r.taken_at
-            ? new Date(r.taken_at * 1000).toISOString().slice(0, 10)
-            : "—";
-          card.innerHTML = `
-            ${r.thumbnail_url ? `<img src="${r.thumbnail_url}" alt="" loading="lazy" />` : ""}
-            <div class="body">
-              <a href="${r.url}" target="_blank" rel="noopener">#${i + 1} @${r.username || "unknown"}</a>
-              <div class="muted">score ${Number(r.score || 0).toFixed(4)} · ${eng} · ${when}</div>
-              <div class="muted">${(r.caption || "").slice(0, 120)}</div>
-            </div>`;
-          grid.appendChild(card);
+          grid.appendChild(buildReelCard(r, i));
         });
       } else if (job.status === "failed") {
         $("discoverTagsWrap").hidden = true;
@@ -537,6 +554,191 @@
       }
 
       $("discoverOut").textContent = JSON.stringify(job, null, 2);
+    }
+
+    function buildReelCard(r, i) {
+      const eng =
+        r.view_count != null
+          ? `${r.view_count} views`
+          : (r.like_count != null ? `${r.like_count} likes` : "n/a eng");
+      const when = r.taken_at
+        ? new Date(r.taken_at * 1000).toISOString().slice(0, 10)
+        : "—";
+
+      const card = document.createElement("article");
+      card.className = "reel-card";
+      card.dataset.reelUrl = r.url || "";
+
+      if (r.thumbnail_url) {
+        const img = document.createElement("img");
+        img.src = r.thumbnail_url;
+        img.alt = "";
+        img.loading = "lazy";
+        card.appendChild(img);
+      }
+
+      const body = document.createElement("div");
+      body.className = "body";
+
+      const link = document.createElement("a");
+      link.href = r.url || "#";
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = `#${i + 1} @${r.username || "unknown"}`;
+
+      const meta = document.createElement("div");
+      meta.className = "muted";
+      meta.textContent = `score ${Number(r.score || 0).toFixed(4)} · ${eng} · ${when}`;
+
+      const caption = document.createElement("div");
+      caption.className = "muted";
+      caption.textContent = (r.caption || "").slice(0, 120);
+
+      const analyzeBtn = document.createElement("button");
+      analyzeBtn.type = "button";
+      analyzeBtn.className = "analyze-btn";
+      analyzeBtn.textContent = "Analyze hook";
+
+      const analysis = document.createElement("div");
+      analysis.className = "reel-analysis";
+
+      analyzeBtn.onclick = () => analyzeDiscoverReel(r.url, analyzeBtn, analysis);
+
+      body.appendChild(link);
+      body.appendChild(meta);
+      body.appendChild(caption);
+      body.appendChild(analyzeBtn);
+      body.appendChild(analysis);
+      card.appendChild(body);
+      return card;
+    }
+
+    function formatNovaAnalysis(job) {
+      const nova = (job.result && job.result.nova_hook) || {};
+      const wrap = document.createElement("div");
+
+      const st = document.createElement("div");
+      st.className = "analysis-status";
+      st.textContent = `Job ${job.job_id.slice(0, 8)}… · ${job.status}` +
+        (job.cost_usd != null ? ` · $${Number(job.cost_usd).toFixed(6)}` : "");
+      wrap.appendChild(st);
+
+      if (job.status === "queued" || job.status === "running") {
+        const v = document.createElement("div");
+        v.className = "analysis-verdict pending";
+        v.textContent = job.status === "queued" ? "Queued…" : "Analyzing…";
+        wrap.appendChild(v);
+        return wrap;
+      }
+
+      if (job.status === "failed") {
+        const v = document.createElement("div");
+        v.className = "analysis-verdict no";
+        v.textContent = job.error || "Analysis failed";
+        wrap.appendChild(v);
+        return wrap;
+      }
+
+      const verdict = document.createElement("div");
+      const yes = !!nova.deliberate_hook_exists;
+      verdict.className = "analysis-verdict " + (yes ? "yes" : "no");
+      verdict.textContent = yes
+        ? `Hook yes · strength ${nova.hook_strength ?? "—"}/100`
+        : `Hook no · strength ${nova.hook_strength ?? 0}/100`;
+      wrap.appendChild(verdict);
+
+      const dl = document.createElement("dl");
+      const rows = [
+        ["Type", nova.hook_type],
+        ["Trigger @", nova.hook_trigger_timestamp != null ? `${nova.hook_trigger_timestamp}s` : null],
+        ["Window", (nova.hook_window_start != null || nova.hook_window_end != null)
+          ? `${nova.hook_window_start ?? "?"}s – ${nova.hook_window_end ?? "?"}s`
+          : null],
+        ["Verbal", nova.verbal_mechanism],
+        ["Visual", nova.visual_mechanism],
+        ["Pattern interrupt", nova.pattern_interrupt],
+        ["Curiosity gap", nova.curiosity_gap],
+        ["Why it retains / what’s missing", nova.retention_explanation],
+      ];
+      rows.forEach(([label, value]) => {
+        if (value == null || value === "") return;
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        dd.textContent = String(value);
+        dl.appendChild(dt);
+        dl.appendChild(dd);
+      });
+      wrap.appendChild(dl);
+
+      if (job.video_url) {
+        const vidLink = document.createElement("a");
+        vidLink.href = job.video_url + authQuery();
+        vidLink.target = "_blank";
+        vidLink.rel = "noopener";
+        vidLink.textContent = "Open downloaded video";
+        vidLink.style.display = "inline-block";
+        vidLink.style.marginTop = "8px";
+        wrap.appendChild(vidLink);
+      }
+
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(nova, null, 2);
+      wrap.appendChild(pre);
+      return wrap;
+    }
+
+    async function analyzeDiscoverReel(reelUrl, btn, analysisEl) {
+      if (!reelUrl) {
+        alert("Missing reel URL");
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "Starting…";
+      analysisEl.classList.add("visible");
+      analysisEl.innerHTML = "";
+      analysisEl.appendChild(formatNovaAnalysis({
+        job_id: "pending",
+        status: "queued",
+        result: {},
+      }));
+
+      try {
+        const res = await fetch("/v1/hooks/analyze", {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ url: reelUrl }),
+        });
+        const accepted = await res.json();
+        if (!res.ok) throw new Error(accepted.detail || res.statusText);
+
+        let job = { job_id: accepted.job_id, status: accepted.status, result: {} };
+        analysisEl.innerHTML = "";
+        analysisEl.appendChild(formatNovaAnalysis(job));
+        btn.textContent = "Analyzing…";
+
+        while (job.status === "queued" || job.status === "running") {
+          await new Promise((r) => setTimeout(r, 1500));
+          job = await poll(accepted.job_id);
+          analysisEl.innerHTML = "";
+          analysisEl.appendChild(formatNovaAnalysis(job));
+        }
+
+        btn.textContent = job.status === "completed" ? "Re-analyze" : "Retry analyze";
+        btn.classList.add("secondary");
+      } catch (err) {
+        analysisEl.innerHTML = "";
+        analysisEl.appendChild(formatNovaAnalysis({
+          job_id: "error",
+          status: "failed",
+          error: String(err),
+          result: {},
+        }));
+        btn.textContent = "Retry analyze";
+        btn.classList.add("secondary");
+      } finally {
+        btn.disabled = false;
+      }
     }
 
     $("go").onclick = async () => {
