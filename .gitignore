@@ -1,16 +1,14 @@
-# Browser page dumps (DOM reference only; large / not source)
-Instagram.html
-Instagram_files/
-comment.html
-
 # Secrets / local env
 .env
 .env.*
 !.env.example
+backend/cookies.txt
+cookies.txt
 
 # Python
 .venv/
 venv/
+backend/.venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -18,14 +16,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Gradio / local server artifacts
+# Local runtime artifacts
 .gradio/
-
-# Node (if added later)
-node_modules/
-
-# Extension generated / local
-reel-timing-extension/api-config.js
+downloads/
+backend/downloads/
 
 # OS / editor
 .DS_Store
