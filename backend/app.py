@@ -20,6 +20,7 @@ load_dotenv(BACKEND_DIR / ".env")
 
 from discover_jobs import discover_manager  # noqa: E402
 from jobs import manager  # noqa: E402
+from platforms import platform_specs, validate_platforms  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("hook-api")
@@ -45,8 +46,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Reel Intelligence API",
-    version="2.1.0",
-    description="Nova-first reel hook analysis + website → Instagram reel discover.",
+    version="2.2.0",
+    description="Nova-first reel hook analysis + website → multi-platform reel discover.",
     lifespan=lifespan,
 )
 
@@ -60,11 +61,15 @@ app.add_middleware(
 
 
 class AnalyzeRequest(BaseModel):
-    url: str = Field(..., description="Instagram reel/post URL")
+    url: str = Field(..., description="Instagram or TikTok video URL")
 
 
 class DiscoverRequest(BaseModel):
     url: str = Field(..., description="Business landing page URL")
+    platforms: Optional[list[str]] = Field(
+        default=None,
+        description='Platforms to scrape, e.g. ["instagram","tiktok"]. Default: ["instagram"].',
+    )
 
 
 class AnalyzeAccepted(BaseModel):
@@ -104,6 +109,7 @@ def health() -> dict[str, Any]:
         "discover": {
             "max_concurrent_jobs": discover_manager.max_workers,
             "max_queue_size": discover_manager.max_queue_size,
+            "platforms": platform_specs(),
         },
         "max_concurrent_jobs": manager.max_workers,
         "max_queue_size": manager.max_queue_size,
@@ -153,12 +159,21 @@ def get_job_video(
     )
 
 
+@app.get("/v1/discover/platforms")
+def list_discover_platforms(_: None = Depends(require_api_key)) -> dict[str, Any]:
+    return {"platforms": platform_specs()}
+
+
 @app.post("/v1/discover/analyze", response_model=AnalyzeAccepted)
 def analyze_discover(
     body: DiscoverRequest, _: None = Depends(require_api_key)
 ) -> AnalyzeAccepted:
     try:
-        job = discover_manager.submit(body.url)
+        platforms = validate_platforms(body.platforms)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        job = discover_manager.submit(body.url, platforms=platforms)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

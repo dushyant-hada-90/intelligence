@@ -1,13 +1,13 @@
-"""Orchestrate scrape → LLM queries → IG search → score → top N."""
+"""Orchestrate scrape → LLM queries → platform search → score → top N."""
 
 from __future__ import annotations
 
 import logging
 import math
 import time
-from typing import Any
+from typing import Any, Optional
 
-from instagram_search import search_keyword_safe
+from platforms import get_search, reel_dedupe_key, validate_platforms
 from query_gen import generate_tags_and_queries
 from tunables import (
     DISCOVER_TOP_N,
@@ -47,7 +47,26 @@ def rank_reels(reels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return ranked[:DISCOVER_TOP_N]
 
 
-def run_discover(url: str) -> dict[str, Any]:
+def _merge_reel(prev: dict[str, Any], reel: dict[str, Any]) -> dict[str, Any]:
+    if (reel.get("engagement") or 0) > (prev.get("engagement") or 0):
+        merged = dict(reel)
+    else:
+        merged = dict(prev)
+    src = sorted(
+        {
+            *(str(x) for x in (prev.get("queries") or [prev.get("query")])),
+            *(str(x) for x in (reel.get("queries") or [reel.get("query")])),
+        }
+    )
+    merged["query"] = src[0] if len(src) == 1 else prev.get("query")
+    merged["queries"] = src
+    return merged
+
+
+def run_discover(
+    url: str, platforms: Optional[list[str]] = None
+) -> dict[str, Any]:
+    selected = validate_platforms(platforms)
     website = scrape_landing_page(url)
     gen = generate_tags_and_queries(website)
     tags = gen.get("tags") or []
@@ -56,42 +75,34 @@ def run_discover(url: str) -> dict[str, Any]:
     cost_usd = float(gen.get("cost_usd") or 0.0)
 
     warnings: list[str] = []
-    by_code: dict[str, dict[str, Any]] = {}
+    by_key: dict[str, dict[str, Any]] = {}
 
     if not queries:
         warnings.append("LLM returned no search queries")
 
-    for q in queries:
-        reels, warn = search_keyword_safe(q)
-        if warn:
-            warnings.append(warn)
-        for reel in reels:
-            code = reel["code"]
-            prev = by_code.get(code)
-            if prev is None:
-                by_code[code] = reel
-            else:
-                # Prefer higher engagement; merge source queries
-                if (reel.get("engagement") or 0) > (prev.get("engagement") or 0):
-                    merged = dict(reel)
+    for platform in selected:
+        search_fn = get_search(platform)
+        for q in queries:
+            reels, warn = search_fn(q)
+            if warn:
+                warnings.append(warn)
+            for reel in reels:
+                item = dict(reel)
+                item.setdefault("platform", platform)
+                key = reel_dedupe_key(item)
+                prev = by_key.get(key)
+                if prev is None:
+                    by_key[key] = item
                 else:
-                    merged = dict(prev)
-                src = sorted(
-                    {
-                        *(str(x) for x in (prev.get("queries") or [prev.get("query")])),
-                        *(str(x) for x in (reel.get("queries") or [reel.get("query")])),
-                    }
-                )
-                merged["query"] = src[0] if len(src) == 1 else prev.get("query")
-                merged["queries"] = src
-                by_code[code] = merged
+                    by_key[key] = _merge_reel(prev, item)
 
-    top = rank_reels(list(by_code.values()))
+    top = rank_reels(list(by_key.values()))
     log.info(
-        "discover done url=%s queries=%s unique=%s top=%s warnings=%s",
+        "discover done url=%s platforms=%s queries=%s unique=%s top=%s warnings=%s",
         website.get("url"),
+        selected,
         len(queries),
-        len(by_code),
+        len(by_key),
         len(top),
         len(warnings),
     )
@@ -104,6 +115,7 @@ def run_discover(url: str) -> dict[str, Any]:
             "headings": website.get("headings"),
             "text_chars": website.get("text_chars"),
         },
+        "platforms": selected,
         "tags": tags,
         "queries": queries,
         "reels": top,

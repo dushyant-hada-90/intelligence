@@ -12,6 +12,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from discover_pipeline import run_discover
+from platforms import validate_platforms
 from tunables import DISCOVER_MAX_CONCURRENT_JOBS, DISCOVER_MAX_QUEUE_SIZE
 
 log = logging.getLogger("discover-jobs")
@@ -25,6 +26,7 @@ def _utc_now() -> str:
 class DiscoverJob:
     job_id: str
     url: str
+    platforms: list[str] = field(default_factory=lambda: ["instagram"])
     status: str = "queued"  # queued | running | completed | failed
     created_at: str = field(default_factory=_utc_now)
     started_at: Optional[str] = None
@@ -38,6 +40,7 @@ class DiscoverJob:
         return {
             "job_id": self.job_id,
             "url": self.url,
+            "platforms": self.platforms,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -79,19 +82,24 @@ class DiscoverJobManager:
             raise ValueError("Paste a full website URL, e.g. https://example.com/")
         return cleaned
 
-    def submit(self, url: str) -> DiscoverJob:
+    def submit(
+        self, url: str, platforms: Optional[list[str]] = None
+    ) -> DiscoverJob:
         cleaned = self.validate_url(url)
+        selected = validate_platforms(platforms)
         with self._lock:
             if self._active_count() >= self.max_queue_size:
                 raise RuntimeError(
                     f"Discover busy: {self.max_queue_size} jobs already queued/running. Retry later."
                 )
             job_id = uuid.uuid4().hex
-            job = DiscoverJob(job_id=job_id, url=cleaned)
+            job = DiscoverJob(job_id=job_id, url=cleaned, platforms=selected)
             self._jobs[job_id] = job
 
         self._executor.submit(self._run_job, job_id)
-        log.info("discover job %s queued url=%s", job_id, cleaned)
+        log.info(
+            "discover job %s queued url=%s platforms=%s", job_id, cleaned, selected
+        )
         return job
 
     def get(self, job_id: str) -> Optional[DiscoverJob]:
@@ -106,10 +114,11 @@ class DiscoverJobManager:
             job.status = "running"
             job.started_at = _utc_now()
             url = job.url
+            platforms = list(job.platforms)
 
         log.info("discover job %s running", job_id)
         try:
-            result = run_discover(url)
+            result = run_discover(url, platforms=platforms)
             usage = result.get("usage") if isinstance(result, dict) else None
             cost = result.get("cost_usd") if isinstance(result, dict) else None
             with self._lock:

@@ -18,7 +18,14 @@ from typing import Callable, List, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from audience_insight import generate_who_why_watched
 from nova import analyze_hook_with_nova
+from platforms import (
+    INSTAGRAM_URL_RE,
+    TIKTOK_URL_RE,
+    canonicalize_video_url,
+    detect_platform,
+)
 from usage_costs import build_usage_report, whisper_usage_block
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -29,10 +36,6 @@ COOKIES_FILE = BACKEND_DIR / "cookies.txt"
 COOKIE_BROWSERS = ("brave", "firefox", "edge")
 MAX_HOOK_WINDOW_SEC = 5.0
 CUT_DETECTOR_THRESHOLD = 27.0
-INSTAGRAM_URL_RE = re.compile(
-    r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+",
-    re.IGNORECASE,
-)
 ProgressCb = Optional[Callable[[float, str], None]]
 
 
@@ -140,6 +143,86 @@ def transcribe_audio(client: OpenAI, audio_path: str) -> tuple[str, dict]:
         return f"Audio transcription failed: {e}", usage
 
 
+def _clean_ydl_error(exc: BaseException | str) -> str:
+    """Strip yt-dlp ANSI colors and collapse whitespace for API/UI errors."""
+    text = str(exc)
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    text = text.replace("ERROR:", "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:500]
+
+
+def _classify_download_failure(message: str) -> str:
+    low = message.lower()
+    if "login required" in low or "please log in" in low or "login_required" in low:
+        return "instagram_login_required"
+    if "rate-limit" in low or "rate limit" in low or "429" in low:
+        return "rate_limited"
+    if "not available" in low or "private" in low or "404" in low:
+        return "unavailable"
+    if "could not find" in low and "cookies database" in low:
+        return "browser_cookies_missing"
+    if "cookie" in low and ("expired" in low or "invalid" in low):
+        return "cookies_invalid"
+    if "unsupported url" in low:
+        return "bad_url"
+    return "download_failed"
+
+
+def _format_download_error(
+    *,
+    platform: str,
+    url: str,
+    attempts: list[tuple[str, str]],
+) -> str:
+    """Human-readable multi-attempt download failure for debugging."""
+    if not attempts:
+        return f"{platform} download failed for {url} (no attempts recorded)."
+
+    classified = [(_classify_download_failure(err), label, err) for label, err in attempts]
+    # Prefer actionable Instagram/TikTok failures over "Edge cookies DB missing".
+    priority = {
+        "instagram_login_required": 0,
+        "cookies_invalid": 1,
+        "rate_limited": 2,
+        "unavailable": 3,
+        "bad_url": 4,
+        "download_failed": 5,
+        "browser_cookies_missing": 9,
+    }
+    classified.sort(key=lambda row: priority.get(row[0], 8))
+    kind, best_label, best_err = classified[0]
+
+    lines = [
+        f"{platform} download failed.",
+        f"URL: {url}",
+        f"Likely cause: {kind} (via {best_label})",
+        f"Detail: {best_err}",
+        "Attempts:",
+    ]
+    for label, err in attempts:
+        lines.append(f"  - {label}: {err}")
+
+    if platform == "Instagram":
+        lines.extend(
+            [
+                "Fix:",
+                "  1. Set a fresh INSTAGRAM_SESSIONID in backend/.env (and restart).",
+                f"  2. Or export Netscape cookies to {COOKIES_FILE}.",
+                "  3. Browser-cookie fallbacks only work if that browser is installed and logged into Instagram.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Fix:",
+                "  1. Retry with a canonical https://www.tiktok.com/@user/video/<id> URL.",
+                f"  2. Optional: Netscape cookies at {COOKIES_FILE}.",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def _ydl_download_opts(**extra) -> dict:
     opts = {
         "format": "bv*[vcodec^=avc]+ba/b[vcodec^=avc]/bv*+ba/b",
@@ -150,6 +233,7 @@ def _ydl_download_opts(**extra) -> dict:
         "noprogress": True,
         "overwrites": True,
         "restrictfilenames": True,
+        "no_color": True,
     }
     opts.update(extra)
     return opts
@@ -193,11 +277,11 @@ def _write_env_cookie_file() -> Optional[Path]:
     return cookie_path
 
 
-def download_reel(url: str, progress: ProgressCb = None) -> Path:
-    """Download an Instagram reel."""
+def download_instagram_reel(url: str, progress: ProgressCb = None) -> Path:
+    """Download an Instagram reel (session cookies / browser cookies)."""
     import yt_dlp
 
-    cleaned = url.strip()
+    cleaned = canonicalize_video_url(url)
     if not INSTAGRAM_URL_RE.search(cleaned):
         raise ValueError(
             "Paste a full Instagram Reel URL, e.g. https://www.instagram.com/reel/XXXX/"
@@ -210,6 +294,8 @@ def download_reel(url: str, progress: ProgressCb = None) -> Path:
         attempts.append(
             ("INSTAGRAM_SESSIONID from .env", _ydl_download_opts(cookiefile=str(env_cookies)))
         )
+    else:
+        print("INSTAGRAM_SESSIONID not set — skipping .env cookie attempt")
     if COOKIES_FILE.exists():
         attempts.append(
             (f"cookie file {COOKIES_FILE.name}", _ydl_download_opts(cookiefile=str(COOKIES_FILE)))
@@ -219,7 +305,16 @@ def download_reel(url: str, progress: ProgressCb = None) -> Path:
             (f"{browser} cookies", _ydl_download_opts(cookiesfrombrowser=(browser,)))
         )
 
-    last_error = None
+    if not attempts:
+        raise RuntimeError(
+            "Instagram download failed.\n"
+            f"URL: {cleaned}\n"
+            "Likely cause: no_credentials\n"
+            "Detail: INSTAGRAM_SESSIONID is empty and no cookies.txt / browser cookies configured.\n"
+            "Fix: set INSTAGRAM_SESSIONID in backend/.env and restart the API."
+        )
+
+    failures: list[tuple[str, str]] = []
     for label, opts in attempts:
         _note(progress, 0.05, f"Downloading reel with {label}...")
         try:
@@ -229,18 +324,76 @@ def download_reel(url: str, progress: ProgressCb = None) -> Path:
             _note(progress, 0.35, f"Downloaded {path.name} ({label})")
             return path
         except Exception as exc:
-            last_error = str(exc)
-            print(f"{label} failed: {last_error}")
+            cleaned_err = _clean_ydl_error(exc)
+            failures.append((label, cleaned_err))
+            print(f"{label} failed: {cleaned_err}")
             continue
 
     raise RuntimeError(
-        "Could not download the reel.\n\n"
-        "Workarounds:\n"
-        "1. Stay logged into Instagram in Brave or Firefox and retry.\n"
-        "2. Paste INSTAGRAM_SESSIONID into .env (this folder).\n"
-        f"3. Or save a Netscape cookies.txt as:\n   {COOKIES_FILE}\n"
-        f"Last error: {last_error}"
+        _format_download_error(platform="Instagram", url=cleaned, attempts=failures)
     )
+
+
+def download_tiktok_video(url: str, progress: ProgressCb = None) -> Path:
+    """Download a TikTok video via yt-dlp (guest; cookies optional)."""
+    import yt_dlp
+
+    cleaned = canonicalize_video_url(url)
+    if not TIKTOK_URL_RE.search(cleaned):
+        raise ValueError(
+            "Paste a full TikTok URL, e.g. https://www.tiktok.com/@user/video/123"
+        )
+
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    attempts: list[tuple[str, dict]] = [
+        ("guest (no cookies)", _ydl_download_opts()),
+    ]
+    if COOKIES_FILE.exists():
+        attempts.append(
+            (f"cookie file {COOKIES_FILE.name}", _ydl_download_opts(cookiefile=str(COOKIES_FILE)))
+        )
+    for browser in COOKIE_BROWSERS:
+        attempts.append(
+            (f"{browser} cookies", _ydl_download_opts(cookiesfrombrowser=(browser,)))
+        )
+
+    failures: list[tuple[str, str]] = []
+    for label, opts in attempts:
+        _note(progress, 0.05, f"Downloading TikTok with {label}...")
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(cleaned, download=True)
+                path = _extract_downloaded_path(ydl, info)
+            _note(progress, 0.35, f"Downloaded {path.name} ({label})")
+            return path
+        except Exception as exc:
+            cleaned_err = _clean_ydl_error(exc)
+            failures.append((label, cleaned_err))
+            print(f"{label} failed: {cleaned_err}")
+            continue
+
+    raise RuntimeError(
+        _format_download_error(platform="TikTok", url=cleaned, attempts=failures)
+    )
+
+
+def download_reel(url: str, progress: ProgressCb = None) -> Path:
+    """Download a reel/video for any supported platform."""
+    cleaned = (url or "").strip()
+    platform = detect_platform(cleaned)
+    if platform == "instagram":
+        return download_instagram_reel(cleaned, progress)
+    if platform == "tiktok":
+        return download_tiktok_video(cleaned, progress)
+    raise ValueError(
+        "Paste an Instagram Reel or TikTok video URL, e.g. "
+        "https://www.instagram.com/reel/XXXX/ or "
+        "https://www.tiktok.com/@user/video/123"
+    )
+
+
+# Back-compat alias used by older call sites / docs mental model
+download_instagram = download_instagram_reel
 
 
 def analyze_video(
@@ -290,10 +443,21 @@ def analyze_video(
     timings["nova_inference_ms"] = _elapsed_ms(t0)
     nova_usage = nova_hook.get("usage") if isinstance(nova_hook, dict) else None
 
+    _note(progress, 0.88, "Audience insight (whoWatched / whyWatched)...")
+    t0 = time.perf_counter()
+    audience = generate_who_why_watched(
+        transcript=transcript,
+        nova_hook=nova_hook if isinstance(nova_hook, dict) else None,
+        source_url=source_url,
+    )
+    timings["audience_insight_ms"] = _elapsed_ms(t0)
+    audience_usage = audience.get("usage") if isinstance(audience, dict) else None
+
     timings["analyze_video_ms"] = _elapsed_ms(pipeline_started)
     usage = build_usage_report(
         whisper=whisper_usage,
         nova=nova_usage if isinstance(nova_usage, dict) else None,
+        audience=audience_usage if isinstance(audience_usage, dict) else None,
     )
 
     result = {
@@ -305,6 +469,8 @@ def analyze_video(
         "nova_hook": nova_hook,
         "deliberate_hook_exists": bool(nova_hook.get("deliberate_hook_exists")),
         "hook_strength": nova_hook.get("hook_strength"),
+        "whoWatched": audience.get("whoWatched") or "",
+        "whyWatched": audience.get("whyWatched") or "",
         "timings": timings,
         "usage": usage,
         "cost_usd": (usage.get("totals") or {}).get("combined_run_usd"),
@@ -326,7 +492,7 @@ def analyze_reel_url(url: str, progress: ProgressCb = None) -> tuple[dict, Path]
 
 def main() -> None:
     if len(sys.argv) <= 1:
-        print("Usage: python hook_pipeline.py <instagram_reel_url|local_video_path>")
+        print("Usage: python hook_pipeline.py <instagram_or_tiktok_url|local_video_path>")
         print("API: uvicorn app:app --host 127.0.0.1 --port 7860")
         sys.exit(1)
 

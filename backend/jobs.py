@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from hook_pipeline import DOWNLOADS_DIR, INSTAGRAM_URL_RE, analyze_reel_url
+from hook_pipeline import DOWNLOADS_DIR, analyze_reel_url
+from platforms import detect_platform
 
 log = logging.getLogger("hook-jobs")
 
@@ -92,9 +93,11 @@ class JobManager:
 
     def validate_url(self, url: str) -> str:
         cleaned = (url or "").strip()
-        if not INSTAGRAM_URL_RE.search(cleaned):
+        if detect_platform(cleaned) is None:
             raise ValueError(
-                "Paste a full Instagram Reel URL, e.g. https://www.instagram.com/reel/XXXX/"
+                "Paste a full Instagram Reel or TikTok video URL, e.g. "
+                "https://www.instagram.com/reel/XXXX/ or "
+                "https://www.tiktok.com/@user/video/123"
             )
         return cleaned
 

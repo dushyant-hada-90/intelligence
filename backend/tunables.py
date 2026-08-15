@@ -26,7 +26,7 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
 
 
 # Result size
-DISCOVER_TOP_N = _env_int("DISCOVER_TOP_N", 20)
+DISCOVER_TOP_N = _env_int("DISCOVER_TOP_N", 4)
 DISCOVER_MAX_QUERIES = _env_int("DISCOVER_MAX_QUERIES", 5)
 DISCOVER_RESULTS_PER_QUERY = _env_int("DISCOVER_RESULTS_PER_QUERY", 24)
 
@@ -34,6 +34,11 @@ DISCOVER_RESULTS_PER_QUERY = _env_int("DISCOVER_RESULTS_PER_QUERY", 24)
 DISCOVER_IG_MIN_DELAY_SEC = _env_float("DISCOVER_IG_MIN_DELAY_SEC", 2.0)
 DISCOVER_IG_MAX_DELAY_SEC = _env_float("DISCOVER_IG_MAX_DELAY_SEC", 5.0)
 DISCOVER_IG_MAX_CONCURRENT = 1
+
+# TikTok rate limit (separate from Instagram; serialized)
+DISCOVER_TT_MIN_DELAY_SEC = _env_float("DISCOVER_TT_MIN_DELAY_SEC", 2.0)
+DISCOVER_TT_MAX_DELAY_SEC = _env_float("DISCOVER_TT_MAX_DELAY_SEC", 5.0)
+DISCOVER_TT_MAX_CONCURRENT = 1
 
 # Discover job pool (separate from hook jobs)
 DISCOVER_MAX_CONCURRENT_JOBS = _env_int("DISCOVER_MAX_CONCURRENT_JOBS", 2)

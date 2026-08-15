@@ -213,6 +213,37 @@
     .reel-card .body { padding: 10px 12px 12px; font-size: 13px; flex: 1; display: flex; flex-direction: column; gap: 6px; }
     .reel-card a { color: var(--accent); text-decoration: none; font-weight: 600; }
     .reel-card .muted { color: var(--muted); font-size: 12px; }
+    .reel-card .platform-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: #243041;
+      color: #c8d4e4;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .reel-card .platform-badge.instagram { background: #3a2440; color: #f0b6ff; }
+    .reel-card .platform-badge.tiktok { background: #1a2e2a; color: #7dffc3; }
+    .platform-picks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 18px;
+      margin: 8px 0 14px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .platform-picks label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      color: var(--text);
+      font-weight: 500;
+    }
     .reel-card .analyze-btn {
       width: 100%;
       margin-top: 6px;
@@ -261,10 +292,10 @@
   <main>
     <div class="banner">
       Developer only — not for production. Set <code>DEV_UI=0</code> to disable this page.
-      Instagram keyword search is rate-limited (1 at a time); discover jobs can take a while.
+      Instagram / TikTok keyword search is rate-limited (1 at a time per platform); discover jobs can take a while.
     </div>
     <h1>Reel Intelligence (Dev)</h1>
-    <p class="lead">Hook analyzer (Nova) and website → trending reels discover.</p>
+    <p class="lead">Hook analyzer (Nova) and website → trending reels discover (Instagram + TikTok).</p>
 
     <div class="shared-key">
       <label for="apiKey">X-API-Key (only if API_KEY is set in .env)</label>
@@ -278,10 +309,10 @@
 
     <section id="panel-hooks" class="panel active">
       <h2>Reel Hook Analyzer (Nova)</h2>
-      <p class="lead">Paste an Instagram reel URL. Shows the downloaded reel, cut marks, cost, and JSON.</p>
+      <p class="lead">Paste an Instagram or TikTok video URL. Shows the downloaded video, cut marks, cost, and JSON.</p>
 
-      <label for="url">Instagram Reel URL</label>
-      <input id="url" type="url" placeholder="https://www.instagram.com/reel/XXXX/" />
+      <label for="url">Instagram / TikTok URL</label>
+      <input id="url" type="url" placeholder="https://www.instagram.com/reel/XXXX/ or https://www.tiktok.com/@user/video/123" />
 
       <div class="row">
         <button id="go" type="button">Analyze</button>
@@ -317,10 +348,16 @@
 
     <section id="panel-discover" class="panel">
       <h2>Website → Reel Discover</h2>
-      <p class="lead">Paste a business landing page URL. Scrapes the site, generates IG keyword queries, ranks reels by engagement + recency.</p>
+      <p class="lead">Paste a business landing page URL. Scrapes the site, generates keyword queries, searches selected platforms, ranks by engagement + recency.</p>
 
       <label for="siteUrl">Website URL</label>
       <input id="siteUrl" type="url" placeholder="https://example.com/" />
+
+      <label>Platforms</label>
+      <div class="platform-picks" id="platformPicks">
+        <label><input type="checkbox" name="platform" value="instagram" checked /> Instagram</label>
+        <label><input type="checkbox" name="platform" value="tiktok" /> TikTok</label>
+      </div>
 
       <div class="row">
         <button id="discoverGo" type="button">Discover</button>
@@ -564,10 +601,12 @@
       const when = r.taken_at
         ? new Date(r.taken_at * 1000).toISOString().slice(0, 10)
         : "—";
+      const platform = (r.platform || "unknown").toLowerCase();
 
       const card = document.createElement("article");
       card.className = "reel-card";
       card.dataset.reelUrl = r.url || "";
+      card.dataset.platform = platform;
 
       if (r.thumbnail_url) {
         const img = document.createElement("img");
@@ -584,7 +623,13 @@
       link.href = r.url || "#";
       link.target = "_blank";
       link.rel = "noopener";
-      link.textContent = `#${i + 1} @${r.username || "unknown"}`;
+      const badge = document.createElement("span");
+      badge.className = "platform-badge " + platform;
+      badge.textContent = platform;
+      link.appendChild(badge);
+      link.appendChild(
+        document.createTextNode(`#${i + 1} @${r.username || "unknown"}`)
+      );
 
       const meta = document.createElement("div");
       meta.className = "muted";
@@ -634,8 +679,15 @@
       if (job.status === "failed") {
         const v = document.createElement("div");
         v.className = "analysis-verdict no";
-        v.textContent = job.error || "Analysis failed";
+        v.textContent = "Analysis failed";
         wrap.appendChild(v);
+        if (job.error) {
+          const pre = document.createElement("pre");
+          pre.style.whiteSpace = "pre-wrap";
+          pre.style.marginTop = "8px";
+          pre.textContent = String(job.error);
+          wrap.appendChild(pre);
+        }
         return wrap;
       }
 
@@ -647,8 +699,11 @@
         : `Hook no · strength ${nova.hook_strength ?? 0}/100`;
       wrap.appendChild(verdict);
 
+      const result = job.result || {};
       const dl = document.createElement("dl");
       const rows = [
+        ["Who watched", result.whoWatched],
+        ["Why watched", result.whyWatched],
         ["Type", nova.hook_type],
         ["Trigger @", nova.hook_trigger_timestamp != null ? `${nova.hook_trigger_timestamp}s` : null],
         ["Window", (nova.hook_window_start != null || nova.hook_window_end != null)
@@ -666,6 +721,7 @@
         dt.textContent = label;
         const dd = document.createElement("dd");
         dd.textContent = String(value);
+        if (String(value).includes("\n")) dd.style.whiteSpace = "pre-wrap";
         dl.appendChild(dt);
         dl.appendChild(dd);
       });
@@ -774,10 +830,21 @@
       }
     };
 
+    function selectedPlatforms() {
+      return Array.from(
+        document.querySelectorAll('input[name="platform"]:checked')
+      ).map((el) => el.value);
+    }
+
     $("discoverGo").onclick = async () => {
       const url = $("siteUrl").value.trim();
       if (!url) {
         alert("Paste a website URL");
+        return;
+      }
+      const platforms = selectedPlatforms();
+      if (!platforms.length) {
+        alert("Select at least one platform");
         return;
       }
       $("discoverGo").disabled = true;
@@ -788,7 +855,7 @@
         const res = await fetch("/v1/discover/analyze", {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ url, platforms }),
         });
         const accepted = await res.json();
         if (!res.ok) throw new Error(accepted.detail || res.statusText);
@@ -805,6 +872,33 @@
         $("discoverGo").disabled = false;
       }
     };
+
+    (async () => {
+      try {
+        const res = await fetch("/v1/discover/platforms", { headers: headers() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = data.platforms || [];
+        if (!list.length) return;
+        const wrap = $("platformPicks");
+        const selected = new Set(selectedPlatforms());
+        if (!selected.size) selected.add("instagram");
+        wrap.innerHTML = "";
+        list.forEach((p) => {
+          const label = document.createElement("label");
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.name = "platform";
+          input.value = p.name;
+          input.checked = selected.has(p.name) || (p.name === "instagram" && !selected.size);
+          label.appendChild(input);
+          label.appendChild(document.createTextNode(" " + (p.label || p.name)));
+          wrap.appendChild(label);
+        });
+      } catch (_) {
+        /* keep static checkboxes */
+      }
+    })();
   </script>
 </body>
 </html>

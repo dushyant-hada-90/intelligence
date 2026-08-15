@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
+from platforms import PlatformSpec, engagement_from_counts, register
 from tunables import (
     DISCOVER_IG_MAX_DELAY_SEC,
     DISCOVER_IG_MIN_DELAY_SEC,
@@ -187,15 +188,10 @@ def _normalize_item(item: dict[str, Any], query: str) -> Optional[dict[str, Any]
     user = item.get("user") or {}
     view_count = item.get("view_count")
     like_count = item.get("like_count")
-    if view_count is not None:
-        engagement = int(view_count)
-        engagement_source = "view_count"
-    elif like_count is not None:
-        engagement = int(like_count)
-        engagement_source = "like_count"
-    else:
-        engagement = 0
-        engagement_source = "none"
+    engagement, engagement_source = engagement_from_counts(
+        int(view_count) if view_count is not None else None,
+        int(like_count) if like_count is not None else None,
+    )
 
     caption_obj = item.get("caption")
     if isinstance(caption_obj, dict):
@@ -207,6 +203,7 @@ def _normalize_item(item: dict[str, Any], query: str) -> Optional[dict[str, Any]
         "id": str(item.get("id") or item.get("pk") or code),
         "pk": str(item.get("pk") or ""),
         "code": code,
+        "platform": "instagram",
         "url": f"https://www.instagram.com/reel/{code}/",
         "caption": caption,
         "username": user.get("username") or "",
@@ -328,4 +325,20 @@ def search_keyword_safe(query: str) -> tuple[list[dict[str, Any]], Optional[str]
         return search_keyword(query), None
     except Exception as exc:
         log.warning("keyword search failed q=%r: %s", query, exc)
-        return [], f"query={query!r}: {exc}"
+        return [], f"instagram query={query!r}: {exc}"
+
+
+def _match_url(url: str) -> bool:
+    from platforms import INSTAGRAM_URL_RE
+
+    return bool(INSTAGRAM_URL_RE.search((url or "").strip()))
+
+
+register(
+    PlatformSpec(
+        name="instagram",
+        label="Instagram",
+        search=search_keyword_safe,
+        url_match=_match_url,
+    )
+)
