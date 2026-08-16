@@ -7,7 +7,7 @@ import os
 from config.env import env_float, env_int
 
 # Result size
-DISCOVER_TOP_N = env_int("DISCOVER_TOP_N", 4)
+DISCOVER_TOP_N = env_int("DISCOVER_TOP_N", 10)
 DISCOVER_MAX_QUERIES = env_int("DISCOVER_MAX_QUERIES", 5)
 DISCOVER_RESULTS_PER_QUERY = env_int("DISCOVER_RESULTS_PER_QUERY", 24)
 
