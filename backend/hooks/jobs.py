@@ -10,7 +10,7 @@ from typing import Any, Optional
 from config.env import env_int
 from hooks.download import DOWNLOADS_DIR
 from hooks.pipeline import analyze_reel_url
-from platforms import detect_platform
+from platforms import detect_platform, media_key
 from shared.jobs import InMemoryJobManager, utc_now
 
 log = logging.getLogger("hook-jobs")
@@ -20,6 +20,7 @@ log = logging.getLogger("hook-jobs")
 class Job:
     job_id: str
     url: str
+    media_key: Optional[str] = None
     status: str = "queued"  # queued | running | completed | failed
     created_at: str = field(default_factory=utc_now)
     started_at: Optional[str] = None
@@ -63,6 +64,7 @@ class JobManager(InMemoryJobManager[Job]):
             thread_name_prefix="hook-worker",
             busy_label="Server",
         )
+        self._inflight: dict[str, str] = {}
 
     def validate_url(self, url: str) -> str:
         cleaned = (url or "").strip()
@@ -76,10 +78,33 @@ class JobManager(InMemoryJobManager[Job]):
 
     def submit(self, url: str) -> Job:
         cleaned = self.validate_url(url)
-        job_id = self.new_job_id()
-        job = Job(job_id=job_id, url=cleaned)
-        self.store_and_submit(job, job_id, self._run_job)
-        log.info("job %s queued url=%s", job_id, cleaned)
+        key = media_key(cleaned)
+        with self._lock:
+            if key:
+                existing_id = self._inflight.get(key)
+                if existing_id:
+                    existing = self._jobs.get(existing_id)
+                    if existing is not None and existing.status in ("queued", "running"):
+                        log.info(
+                            "job %s coalesced key=%s url=%s",
+                            existing_id,
+                            key,
+                            cleaned,
+                        )
+                        return existing
+            if self._active_count() >= self.max_queue_size:
+                raise RuntimeError(
+                    f"{self._busy_label} busy: {self.max_queue_size} jobs already "
+                    "queued/running. Retry later."
+                )
+            job_id = self.new_job_id()
+            job = Job(job_id=job_id, url=cleaned, media_key=key)
+            self._jobs[job_id] = job
+            if key:
+                self._inflight[key] = job_id
+
+        self._executor.submit(self._run_job, job_id)
+        log.info("job %s queued url=%s key=%s", job_id, cleaned, key)
         return job
 
     def resolve_video_path(self, job_id: str) -> Optional[Path]:
@@ -100,6 +125,11 @@ class JobManager(InMemoryJobManager[Job]):
             return None
         return path
 
+    def _drop_inflight(self, job: Job) -> None:
+        key = job.media_key
+        if key and self._inflight.get(key) == job.job_id:
+            self._inflight.pop(key, None)
+
     def _run_job(self, job_id: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -111,7 +141,7 @@ class JobManager(InMemoryJobManager[Job]):
 
         log.info("job %s running", job_id)
         try:
-            result, video_path = analyze_reel_url(url)
+            result, video_path = analyze_reel_url(url, job_id=job_id)
             usage = result.get("usage") if isinstance(result, dict) else None
             cost = None
             if isinstance(result, dict):
@@ -126,6 +156,7 @@ class JobManager(InMemoryJobManager[Job]):
                 job.usage = usage if isinstance(usage, dict) else None
                 job.cost_usd = float(cost) if cost is not None else None
                 job.video_path = str(Path(video_path).resolve())
+                self._drop_inflight(job)
             log.info(
                 "job %s completed cost_usd=%s cuts=%s",
                 job_id,
@@ -139,6 +170,7 @@ class JobManager(InMemoryJobManager[Job]):
                 job.status = "failed"
                 job.finished_at = utc_now()
                 job.error = str(exc)
+                self._drop_inflight(job)
 
 
 manager = JobManager()

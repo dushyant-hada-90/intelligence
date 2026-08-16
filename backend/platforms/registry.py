@@ -12,7 +12,7 @@ SearchFn = Callable[[str], tuple[list[dict[str, Any]], Optional[str]]]
 MatchFn = Callable[[str], bool]
 
 INSTAGRAM_URL_RE = re.compile(
-    r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+",
+    r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/([A-Za-z0-9_-]+)",
     re.IGNORECASE,
 )
 TIKTOK_URL_RE = re.compile(
@@ -20,7 +20,7 @@ TIKTOK_URL_RE = re.compile(
     re.IGNORECASE,
 )
 TIKTOK_VIDEO_RE = re.compile(
-    r"https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/\d+",
+    r"https?://(?:www\.)?tiktok\.com/@[\w.-]+/video/(\d+)",
     re.IGNORECASE,
 )
 
@@ -115,6 +115,21 @@ def canonicalize_video_url(url: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return cleaned
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def media_key(url: str) -> Optional[str]:
+    """Stable (platform, reel_id) key from the URL path, or None if id is missing."""
+    cleaned = canonicalize_video_url(url)
+    platform = detect_platform(cleaned)
+    if platform == "instagram":
+        m = INSTAGRAM_URL_RE.search(cleaned)
+        if m:
+            return f"instagram:{m.group(1)}"
+    if platform == "tiktok":
+        m = TIKTOK_VIDEO_RE.search(cleaned)
+        if m:
+            return f"tiktok:{m.group(1)}"
+    return None
 
 
 def engagement_from_counts(

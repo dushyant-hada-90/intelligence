@@ -202,10 +202,13 @@ def analyze_video(
     return result
 
 
-def analyze_reel_url(url: str, progress: ProgressCb = None) -> tuple[dict, Path]:
+def analyze_reel_url(
+    url: str, progress: ProgressCb = None, *, job_id: Optional[str] = None
+) -> tuple[dict, Path]:
     timings: dict = {}
     t0 = time.perf_counter()
-    video_path = download_reel(url, progress)
+    dest_dir = DOWNLOADS_DIR / job_id if job_id else DOWNLOADS_DIR
+    video_path = download_reel(url, progress, dest_dir=dest_dir)
     timings["download_ms"] = _elapsed_ms(t0)
     result = analyze_video(
         video_path, progress, source_url=url.strip(), timings=timings

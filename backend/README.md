@@ -41,7 +41,7 @@ CLI (optional): `python -m hooks.pipeline <instagram_or_tiktok_url>`
 | Method | Path | Notes |
 |--------|------|--------|
 | `GET` | `/health` | Liveness + discover platform list |
-| `POST` | `/v1/hooks/analyze` | Body `{ "url": "<instagram or tiktok>" }` → `{ "job_id", "status": "queued" }` |
+| `POST` | `/v1/hooks/analyze` | Body `{ "url": "<instagram or tiktok>" }` → `{ "job_id", "status": "queued" }`. Same reel already queued/running returns that `job_id`. |
 | `GET` | `/v1/hooks/jobs/{job_id}` | Job status + result (`nova_hook`, `whoWatched`, `whyWatched`) / error / cost |
 | `GET` | `/v1/hooks/jobs/{job_id}/video` | Downloaded MP4 (use `?api_key=` if `API_KEY` set) |
 | `GET` | `/v1/discover/platforms` | `{ "platforms": [{ "name", "label" }, ...] }` |
@@ -70,6 +70,8 @@ Each discover reel includes `platform` for UI badges. Dedupe key is `(platform, 
 ## Concurrency
 
 Hook jobs: `MAX_CONCURRENT_JOBS` / `MAX_QUEUE_SIZE`.  
+A second analyze of the same reel (`platform` + id in the URL path) while the first is queued/running returns the existing `job_id`.  
+Downloads go under `downloads/{job_id}/`. Browser cookie fallbacks are off unless `HOOK_BROWSER_COOKIES=1`.  
 Discover jobs: `DISCOVER_MAX_CONCURRENT_JOBS` / `DISCOVER_MAX_QUEUE_SIZE`.  
 Beyond queue limits, `POST` returns **503**.
 

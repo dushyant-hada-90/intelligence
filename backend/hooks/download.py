@@ -21,6 +21,11 @@ COOKIE_BROWSERS = ("brave", "firefox", "edge")
 ProgressCb = Optional[Callable[[float, str], None]]
 
 
+def _browser_cookies_enabled() -> bool:
+    raw = (os.getenv("HOOK_BROWSER_COOKIES") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _note(progress: ProgressCb, fraction: float, message: str) -> None:
     print(message)
     if progress:
@@ -92,7 +97,7 @@ def _format_download_error(
                 "Fix:",
                 "  1. Set a fresh INSTAGRAM_SESSIONID in backend/.env (and restart).",
                 f"  2. Or export Netscape cookies to {COOKIES_FILE}.",
-                "  3. Browser-cookie fallbacks only work if that browser is installed and logged into Instagram.",
+                "  3. Optional: set HOOK_BROWSER_COOKIES=1 to try Brave/Firefox/Edge profiles.",
             ]
         )
     else:
@@ -106,11 +111,12 @@ def _format_download_error(
     return "\n".join(lines)
 
 
-def _ydl_download_opts(**extra) -> dict:
+def _ydl_download_opts(*, dest_dir: Path, **extra) -> dict:
+    dest_dir.mkdir(parents=True, exist_ok=True)
     opts = {
         "format": "bv*[vcodec^=avc]+ba/b[vcodec^=avc]/bv*+ba/b",
         "merge_output_format": "mp4",
-        "outtmpl": str(DOWNLOADS_DIR / "%(id)s.%(ext)s"),
+        "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "noprogress": True,
@@ -160,7 +166,9 @@ def _write_env_cookie_file() -> Optional[Path]:
     return cookie_path
 
 
-def download_instagram_reel(url: str, progress: ProgressCb = None) -> Path:
+def download_instagram_reel(
+    url: str, progress: ProgressCb = None, *, dest_dir: Optional[Path] = None
+) -> Path:
     """Download an Instagram reel (session cookies / browser cookies)."""
     import yt_dlp
 
@@ -170,23 +178,34 @@ def download_instagram_reel(url: str, progress: ProgressCb = None) -> Path:
             "Paste a full Instagram Reel URL, e.g. https://www.instagram.com/reel/XXXX/"
         )
 
-    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = dest_dir or DOWNLOADS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[tuple[str, dict]] = []
     env_cookies = _write_env_cookie_file()
     if env_cookies:
         attempts.append(
-            ("INSTAGRAM_SESSIONID from .env", _ydl_download_opts(cookiefile=str(env_cookies)))
+            (
+                "INSTAGRAM_SESSIONID from .env",
+                _ydl_download_opts(dest_dir=out_dir, cookiefile=str(env_cookies)),
+            )
         )
     else:
         print("INSTAGRAM_SESSIONID not set — skipping .env cookie attempt")
     if COOKIES_FILE.exists():
         attempts.append(
-            (f"cookie file {COOKIES_FILE.name}", _ydl_download_opts(cookiefile=str(COOKIES_FILE)))
+            (
+                f"cookie file {COOKIES_FILE.name}",
+                _ydl_download_opts(dest_dir=out_dir, cookiefile=str(COOKIES_FILE)),
+            )
         )
-    for browser in COOKIE_BROWSERS:
-        attempts.append(
-            (f"{browser} cookies", _ydl_download_opts(cookiesfrombrowser=(browser,)))
-        )
+    if _browser_cookies_enabled():
+        for browser in COOKIE_BROWSERS:
+            attempts.append(
+                (
+                    f"{browser} cookies",
+                    _ydl_download_opts(dest_dir=out_dir, cookiesfrombrowser=(browser,)),
+                )
+            )
 
     if not attempts:
         raise RuntimeError(
@@ -217,7 +236,9 @@ def download_instagram_reel(url: str, progress: ProgressCb = None) -> Path:
     )
 
 
-def download_tiktok_video(url: str, progress: ProgressCb = None) -> Path:
+def download_tiktok_video(
+    url: str, progress: ProgressCb = None, *, dest_dir: Optional[Path] = None
+) -> Path:
     """Download a TikTok video via yt-dlp (guest; cookies optional)."""
     import yt_dlp
 
@@ -227,18 +248,26 @@ def download_tiktok_video(url: str, progress: ProgressCb = None) -> Path:
             "Paste a full TikTok URL, e.g. https://www.tiktok.com/@user/video/123"
         )
 
-    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = dest_dir or DOWNLOADS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     attempts: list[tuple[str, dict]] = [
-        ("guest (no cookies)", _ydl_download_opts()),
+        ("guest (no cookies)", _ydl_download_opts(dest_dir=out_dir)),
     ]
     if COOKIES_FILE.exists():
         attempts.append(
-            (f"cookie file {COOKIES_FILE.name}", _ydl_download_opts(cookiefile=str(COOKIES_FILE)))
+            (
+                f"cookie file {COOKIES_FILE.name}",
+                _ydl_download_opts(dest_dir=out_dir, cookiefile=str(COOKIES_FILE)),
+            )
         )
-    for browser in COOKIE_BROWSERS:
-        attempts.append(
-            (f"{browser} cookies", _ydl_download_opts(cookiesfrombrowser=(browser,)))
-        )
+    if _browser_cookies_enabled():
+        for browser in COOKIE_BROWSERS:
+            attempts.append(
+                (
+                    f"{browser} cookies",
+                    _ydl_download_opts(dest_dir=out_dir, cookiesfrombrowser=(browser,)),
+                )
+            )
 
     failures: list[tuple[str, str]] = []
     for label, opts in attempts:
@@ -260,14 +289,16 @@ def download_tiktok_video(url: str, progress: ProgressCb = None) -> Path:
     )
 
 
-def download_reel(url: str, progress: ProgressCb = None) -> Path:
+def download_reel(
+    url: str, progress: ProgressCb = None, *, dest_dir: Optional[Path] = None
+) -> Path:
     """Download a reel/video for any supported platform."""
     cleaned = (url or "").strip()
     platform = detect_platform(cleaned)
     if platform == "instagram":
-        return download_instagram_reel(cleaned, progress)
+        return download_instagram_reel(cleaned, progress, dest_dir=dest_dir)
     if platform == "tiktok":
-        return download_tiktok_video(cleaned, progress)
+        return download_tiktok_video(cleaned, progress, dest_dir=dest_dir)
     raise ValueError(
         "Paste an Instagram Reel or TikTok video URL, e.g. "
         "https://www.instagram.com/reel/XXXX/ or "
