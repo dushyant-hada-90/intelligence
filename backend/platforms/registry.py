@@ -9,7 +9,6 @@ from urllib.parse import urlparse, urlunparse
 
 # Search: (query) -> (reels, warning_or_None)
 SearchFn = Callable[[str], tuple[list[dict[str, Any]], Optional[str]]]
-# Download: (url, progress) -> Path — bound later to avoid circular imports
 MatchFn = Callable[[str], bool]
 
 INSTAGRAM_URL_RE = re.compile(
@@ -43,9 +42,8 @@ def register(spec: PlatformSpec) -> None:
 
 def ensure_loaded() -> None:
     """Import adapters so they self-register (idempotent)."""
-    # Always import known adapters; register() is idempotent by name overwrite.
-    import instagram_search  # noqa: F401
-    import tiktok_search  # noqa: F401
+    import platforms.instagram.search  # noqa: F401
+    import platforms.tiktok.search  # noqa: F401
 
 
 def known_platforms() -> list[str]:
@@ -103,7 +101,6 @@ def detect_platform(url: str) -> Optional[str]:
     for spec in _REGISTRY.values():
         if spec.url_match(cleaned):
             return spec.name
-    # Fallbacks before adapters load matchers
     if INSTAGRAM_URL_RE.search(cleaned):
         return "instagram"
     if TIKTOK_URL_RE.search(cleaned):

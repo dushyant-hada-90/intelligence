@@ -3,33 +3,17 @@
 from __future__ import annotations
 
 import logging
-import os
-import threading
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from hook_pipeline import DOWNLOADS_DIR, analyze_reel_url
+from config.env import env_int
+from hooks.download import DOWNLOADS_DIR
+from hooks.pipeline import analyze_reel_url
 from platforms import detect_platform
+from shared.jobs import InMemoryJobManager, utc_now
 
 log = logging.getLogger("hook-jobs")
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return default
 
 
 @dataclass
@@ -37,7 +21,7 @@ class Job:
     job_id: str
     url: str
     status: str = "queued"  # queued | running | completed | failed
-    created_at: str = field(default_factory=_utc_now)
+    created_at: str = field(default_factory=utc_now)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     error: Optional[str] = None
@@ -47,7 +31,7 @@ class Job:
     video_path: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "job_id": self.job_id,
             "url": self.url,
             "status": self.status,
@@ -65,31 +49,20 @@ class Job:
                 else None
             ),
         }
-        return payload
 
 
-class JobManager:
+class JobManager(InMemoryJobManager[Job]):
     def __init__(
         self,
         max_workers: Optional[int] = None,
         max_queue_size: Optional[int] = None,
     ) -> None:
-        self.max_workers = max_workers or _env_int("MAX_CONCURRENT_JOBS", 3)
-        self.max_queue_size = max_queue_size or _env_int("MAX_QUEUE_SIZE", 20)
-        self._jobs: dict[str, Job] = {}
-        self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(
-            max_workers=self.max_workers,
+        super().__init__(
+            max_workers=max_workers or env_int("MAX_CONCURRENT_JOBS", 3),
+            max_queue_size=max_queue_size or env_int("MAX_QUEUE_SIZE", 20),
             thread_name_prefix="hook-worker",
+            busy_label="Server",
         )
-        log.info(
-            "JobManager ready max_workers=%s max_queue_size=%s",
-            self.max_workers,
-            self.max_queue_size,
-        )
-
-    def _active_count(self) -> int:
-        return sum(1 for j in self._jobs.values() if j.status in ("queued", "running"))
 
     def validate_url(self, url: str) -> str:
         cleaned = (url or "").strip()
@@ -103,22 +76,11 @@ class JobManager:
 
     def submit(self, url: str) -> Job:
         cleaned = self.validate_url(url)
-        with self._lock:
-            if self._active_count() >= self.max_queue_size:
-                raise RuntimeError(
-                    f"Server busy: {self.max_queue_size} jobs already queued/running. Retry later."
-                )
-            job_id = uuid.uuid4().hex
-            job = Job(job_id=job_id, url=cleaned)
-            self._jobs[job_id] = job
-
-        self._executor.submit(self._run_job, job_id)
+        job_id = self.new_job_id()
+        job = Job(job_id=job_id, url=cleaned)
+        self.store_and_submit(job, job_id, self._run_job)
         log.info("job %s queued url=%s", job_id, cleaned)
         return job
-
-    def get(self, job_id: str) -> Optional[Job]:
-        with self._lock:
-            return self._jobs.get(job_id)
 
     def resolve_video_path(self, job_id: str) -> Optional[Path]:
         """Return the downloaded video Path if it belongs to this job and downloads dir."""
@@ -144,7 +106,7 @@ class JobManager:
             if job is None:
                 return
             job.status = "running"
-            job.started_at = _utc_now()
+            job.started_at = utc_now()
             url = job.url
 
         log.info("job %s running", job_id)
@@ -159,7 +121,7 @@ class JobManager:
             with self._lock:
                 job = self._jobs[job_id]
                 job.status = "completed"
-                job.finished_at = _utc_now()
+                job.finished_at = utc_now()
                 job.result = result
                 job.usage = usage if isinstance(usage, dict) else None
                 job.cost_usd = float(cost) if cost is not None else None
@@ -175,11 +137,8 @@ class JobManager:
             with self._lock:
                 job = self._jobs[job_id]
                 job.status = "failed"
-                job.finished_at = _utc_now()
+                job.finished_at = utc_now()
                 job.error = str(exc)
-
-    def shutdown(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 manager = JobManager()

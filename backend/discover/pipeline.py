@@ -7,14 +7,14 @@ import math
 import time
 from typing import Any, Optional
 
-from platforms import get_search, reel_dedupe_key, validate_platforms
-from query_gen import generate_tags_and_queries
-from tunables import (
+from config.tunables import (
     DISCOVER_TOP_N,
     TREND_RECENCY_HALF_LIFE_DAYS,
     TREND_VIEWS_WEIGHT,
 )
-from web_scrape import scrape_landing_page
+from discover.query_gen import generate_tags_and_queries
+from discover.scrape import scrape_landing_page
+from platforms import get_search, reel_dedupe_key, validate_platforms
 
 log = logging.getLogger("discover-pipeline")
 

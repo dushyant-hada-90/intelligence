@@ -12,17 +12,11 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
-
-try:
-    from usage_costs import nova_usage_block
-except ImportError:  # pragma: no cover
-    nova_usage_block = None  # type: ignore
+from shared.costs import nova_usage_block
 
 NOVA_MODEL_ID = "us.amazon.nova-2-lite-v1:0"
 NOVA_CLIP_SEC = 12.0
@@ -71,6 +65,8 @@ class NovaHookResult(BaseModel):
     pattern_interrupt: Optional[str] = None
     curiosity_gap: Optional[str] = None
     retention_explanation: str
+    whoWatched: str = ""
+    whyWatched: str = ""
 
 
 NOVA_SYSTEM_PROMPT = """
@@ -109,12 +105,45 @@ JSON schema (all keys required; use null for inapplicable optional fields):
   "visual_mechanism": string|null,
   "pattern_interrupt": string|null,
   "curiosity_gap": string|null,
-  "retention_explanation": string
+  "retention_explanation": string,
+  "whoWatched": string,
+  "whyWatched": string
 }
 
 If deliberate_hook_exists is false: set timestamps and mechanism fields to null,
 set hook_strength to 0, and explain what is missing in retention_explanation.
+
+AUDIENCE FIELDS (always fill, even if hook is weak):
+whoWatched:
+- Types of people likely to stop and watch (audience segments).
+- Style examples: doctors, couples, tech enthusiasts, fitness beginners.
+- 2–5 bullets as one string; each line starts with "- ".
+- Do NOT invent demographics you cannot support from the content.
+
+whyWatched:
+- What makes this reel worth watching (hook, curiosity gap, visual punch, relatability, payoff tease).
+- 2–5 bullets as one string; each line starts with "- ".
+- Concrete and specific to THIS reel; if the opening is weak, say honestly what might still hold a niche viewer — or what fails.
+- No hashtags, URLs, or markdown bold/italic.
 """.strip()
+
+
+def _as_bullet_string(value: Any) -> str:
+    """Normalize list or string into newline-separated '- ' bullets."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        lines = [str(x).strip() for x in value if str(x).strip()]
+    else:
+        text = str(value).replace("\r\n", "\n").strip()
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    out: list[str] = []
+    for ln in lines:
+        ln = re.sub(r"^[-•*]\s*", "", ln).strip()
+        if not ln:
+            continue
+        out.append(f"- {ln}")
+    return "\n".join(out)
 
 
 def _require_credentials() -> None:
@@ -295,7 +324,7 @@ def analyze_hook_with_nova(
                         ],
                     }
                 ],
-                inferenceConfig={"temperature": 0.0, "maxTokens": 2048},
+                inferenceConfig={"temperature": 0.0, "maxTokens": 3072},
             )
         except Exception as exc:
             # Lazy import so missing boto3 still allows credential-skip path above.
@@ -327,6 +356,13 @@ def analyze_hook_with_nova(
 
         raw_text = _extract_assistant_text(response)
         raw_obj = _parse_json_response(raw_text)
+        if isinstance(raw_obj, dict):
+            raw_obj["whoWatched"] = _as_bullet_string(raw_obj.get("whoWatched")) or (
+                "- General short-form scrollers (audience unclear from available signals)"
+            )
+            raw_obj["whyWatched"] = _as_bullet_string(raw_obj.get("whyWatched")) or (
+                "- Insufficient signal to name a clear watch reason"
+            )
         try:
             parsed = NovaHookResult.model_validate(raw_obj)
         except ValidationError as exc:
@@ -341,20 +377,12 @@ def analyze_hook_with_nova(
         input_tokens = int(usage.get("inputTokens") or 0)
         output_tokens = int(usage.get("outputTokens") or 0)
         total_tokens = int(usage.get("totalTokens") or (input_tokens + output_tokens))
-        if nova_usage_block is not None:
-            out["usage"] = nova_usage_block(
-                model=NOVA_MODEL_ID,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                total_tokens=total_tokens,
-            )
-        else:
-            out["usage"] = {
-                "model": NOVA_MODEL_ID,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-            }
+        out["usage"] = nova_usage_block(
+            model=NOVA_MODEL_ID,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
         return out
     finally:
         if clip_path is not None and clip_path.exists():

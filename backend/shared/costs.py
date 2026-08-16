@@ -83,23 +83,18 @@ def build_usage_report(
     *,
     whisper: Optional[Dict[str, Any]] = None,
     nova: Optional[Dict[str, Any]] = None,
-    audience: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     whisper_cost = float((whisper or {}).get("cost_usd") or 0.0)
     nova_cost = float((nova or {}).get("cost_usd") or 0.0)
-    audience_cost = float((audience or {}).get("cost_usd") or 0.0)
-    combined = _usd(whisper_cost + nova_cost + audience_cost)
+    combined = _usd(whisper_cost + nova_cost)
 
     return {
         "pricing_notes": PRICING_NOTES,
         "whisper": whisper,
         "nova": nova,
-        "audience": audience,
         "totals": {
             "combined_run_usd": combined,
-            "stack_b_nova_usd": combined,
             "whisper_usd": _usd(whisper_cost),
             "nova_usd": _usd(nova_cost),
-            "audience_usd": _usd(audience_cost),
         },
     }

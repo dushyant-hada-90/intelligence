@@ -2,8 +2,22 @@
 
 FastAPI service with two pipelines:
 
-1. **Hooks** — download an Instagram or TikTok video, Whisper transcript, shot cuts, **Amazon Nova 2 Lite** hook verdict, plus LLM `whoWatched` / `whyWatched` bullet strings and `cost_usd`.
-2. **Discover** — scrape a business landing page, LLM keyword queries, multi-platform search (`platforms[]`), top-N reels by engagement + recency.
+1. **Hooks** — download an Instagram or TikTok video, Whisper transcript, shot cuts, **Amazon Nova 2 Lite** (hook verdict + `whoWatched` / `whyWatched`), and `cost_usd`.
+2. **Discover** — scrape a business landing page (Firecrawl when configured), LLM keyword queries, multi-platform search (`platforms[]`), top-N reels by engagement + recency.
+
+## Layout
+
+```
+backend/
+  app.py              # uvicorn entry (re-exports api.app)
+  api/                # FastAPI routes
+  config/             # env + tunables
+  shared/             # http, llm, costs, job base
+  platforms/          # registry + instagram/tiktok search
+  discover/           # scrape, query gen, pipeline, jobs
+  hooks/              # download, nova, pipeline, jobs
+  static/             # /dev UI
+```
 
 ## Setup
 
@@ -15,18 +29,12 @@ uvicorn app:app --host 127.0.0.1 --port 7860
 ```
 
 Required env: `OPENAI_API_KEY` (Whisper + discover LLM), AWS credentials (Nova hooks).  
+Discover landing scrape: set `FIRECRAWL_API_KEY` for Firecrawl (JS render + clean markdown); without it, falls back to httpx + BeautifulSoup. Override with `DISCOVER_SCRAPE_BACKEND=auto|firecrawl|httpx`.  
 Instagram discover/download: `INSTAGRAM_SESSIONID`.  
-TikTok download uses yt-dlp guest. TikTok **discover search** uses Playwright Chromium on a dedicated thread.
-One-time setup (in the same venv you run uvicorn from):
+TikTok discover search: logged-in cookies in `.env` — `TIKTOK_SESSIONID` (`sid_tt`), plus `TIKTOK_MS_TOKEN` / `TIKTOK_TTWID` when possible (or `TIKTOK_COOKIES`).  
+TikTok analyze/download: yt-dlp (guest).
 
-```bash
-pip install playwright
-playwright install chromium
-```
-
-If launch still says executable missing, clear any custom `PLAYWRIGHT_BROWSERS_PATH` and re-run `playwright install chromium`.
-
-CLI (optional): `python hook_pipeline.py <instagram_or_tiktok_url>`
+CLI (optional): `python -m hooks.pipeline <instagram_or_tiktok_url>`
 
 ## Endpoints
 
@@ -45,15 +53,17 @@ If `API_KEY` is set, send header `X-API-Key` on analyze/job routes.
 
 ## Platforms (modular)
 
-Search adapters register in `platforms.py`. Current: `instagram`, `tiktok`.  
-Adding another network: implement `*_search.py` (+ hook URL/download if needed) → `register(PlatformSpec(...))`.
+Search adapters register in `platforms/`. Current: `instagram`, `tiktok`.  
+Adding another network: implement `platforms/<name>/search.py` → `register(PlatformSpec(...))`.
 
 Each discover reel includes `platform` for UI badges. Dedupe key is `(platform, id)`.
 
 ## Discover notes
 
-- Instagram: browser GraphQL `PolarisKeywordSearchExplorePageRelayQuery` (see `tunables.IG_KEYWORD_DOC_ID`). Serialized with jitter (`DISCOVER_IG_*_DELAY_SEC`).
-- TikTok: discover search via **Playwright** (dedicated thread). Defaults to **headful Google Chrome** (`TIKTOK_PLAYWRIGHT_HEADLESS=0`, `TIKTOK_PLAYWRIGHT_CHANNEL=chrome`) because headless Chromium often gets empty `item/full` bodies. Soft-fails into `warnings`. Analyze/download still uses yt-dlp.
+- Landing page: **Firecrawl** when `FIRECRAWL_API_KEY` is set (`DISCOVER_SCRAPE_BACKEND=auto`); on failure or missing key, **httpx + BeautifulSoup**. Force with `firecrawl` or `httpx`.
+- Instagram: browser GraphQL `PolarisKeywordSearchExplorePageRelayQuery` (see `config.tunables.IG_KEYWORD_DOC_ID`). Serialized with jitter (`DISCOVER_IG_*_DELAY_SEC`).
+- TikTok: discover search via **httpx + logged-in `.env` cookies** (`TIKTOK_SESSIONID` / `sid_tt`, ideally also `TIKTOK_MS_TOKEN` + `TIKTOK_TTWID`). Soft-fails into `warnings` with http status/body debug. Analyze/download still uses yt-dlp.
+- Keep `TIKTOK_SESSIONID` fresh the same way as Instagram’s session cookie.
 - Scoring uses `view_count` / `playCount` when present, else likes, plus recency (`TREND_VIEWS_WEIGHT`, `TREND_RECENCY_HALF_LIFE_DAYS`).
 - Partial platform failures are soft: job still completes with `warnings`.
 

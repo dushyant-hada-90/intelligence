@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 from typing import Any
 
-from openai import OpenAI
-
-from tunables import DISCOVER_LLM_MODEL, DISCOVER_MAX_QUERIES
-from usage_costs import cost_from_tokens
+from config.tunables import DISCOVER_LLM_MODEL, DISCOVER_MAX_QUERIES
+from shared.costs import cost_from_tokens
+from shared.llm import (
+    GPT4O_MINI_INPUT_PER_1M,
+    GPT4O_MINI_OUTPUT_PER_1M,
+    openai_client,
+    parse_json_payload,
+)
 
 log = logging.getLogger("query-gen")
-
-# gpt-4o-mini public list (approx); verify before billing
-GPT4O_MINI_INPUT_PER_1M = 0.15
-GPT4O_MINI_OUTPUT_PER_1M = 0.60
 
 _SYSTEM = """You help find Instagram Reels that match a business's niche.
 Given website copy, output JSON only (no markdown) with:
@@ -34,13 +32,6 @@ Rules for queries:
 """
 
 
-def _openai_client() -> OpenAI:
-    key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY is required for discover query generation")
-    return OpenAI(api_key=key)
-
-
 def _website_blob(website: dict[str, Any]) -> str:
     parts = [
         f"URL: {website.get('final_url') or website.get('url')}",
@@ -54,19 +45,11 @@ def _website_blob(website: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _parse_json_payload(raw: str) -> dict[str, Any]:
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
-
-
 def generate_tags_and_queries(website: dict[str, Any]) -> dict[str, Any]:
     """Return tags, queries, and LLM usage/cost."""
     max_q = DISCOVER_MAX_QUERIES
     model = DISCOVER_LLM_MODEL
-    client = _openai_client()
+    client = openai_client(purpose="discover query generation")
     user = (
         f"Produce at most {max_q} search queries and useful tags for this site:\n\n"
         + _website_blob(website)
@@ -82,7 +65,7 @@ def generate_tags_and_queries(website: dict[str, Any]) -> dict[str, Any]:
         ],
     )
     choice = resp.choices[0].message.content or "{}"
-    data = _parse_json_payload(choice)
+    data = parse_json_payload(choice)
     tags = [str(t).strip() for t in (data.get("tags") or []) if str(t).strip()]
     queries: list[str] = []
     for q in data.get("queries") or []:

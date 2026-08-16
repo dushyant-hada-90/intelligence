@@ -5,18 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import re
 import threading
-import time
 import uuid
 from typing import Any, Optional
 from urllib.parse import quote
 
 import httpx
 
-from platforms import PlatformSpec, engagement_from_counts, register
-from tunables import (
+from config.tunables import (
     DISCOVER_IG_MAX_DELAY_SEC,
     DISCOVER_IG_MIN_DELAY_SEC,
     DISCOVER_RESULTS_PER_QUERY,
@@ -24,17 +21,15 @@ from tunables import (
     IG_KEYWORD_FRIENDLY_NAME,
     IG_WEB_APP_ID,
 )
+from platforms.rate_limit import JitterLimiter
+from platforms.registry import PlatformSpec, engagement_from_counts, register
+from platforms.safe_search import safe_search
+from shared.http import httpx_client
 
 log = logging.getLogger("ig-search")
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
-
 # Serialize all IG network work (max concurrent = 1 by design).
-_IG_LOCK = threading.Lock()
-_LAST_IG_CALL_AT = 0.0
+_IG_LIMITER = JitterLimiter(DISCOVER_IG_MIN_DELAY_SEC, DISCOVER_IG_MAX_DELAY_SEC)
 _BOOTSTRAP: dict[str, Any] = {"fb_dtsg": None, "lsd": None, "csrftoken": None}
 _BOOTSTRAP_LOCK = threading.Lock()
 
@@ -57,23 +52,6 @@ def _cookie_header() -> str:
     if csrf:
         parts.append(f"csrftoken={csrf}")
     return "; ".join(parts)
-
-
-def _wait_before_ig_call() -> None:
-    """Caller must hold _IG_LOCK. Enforce jittered gap since last IG call."""
-    global _LAST_IG_CALL_AT
-    lo = min(DISCOVER_IG_MIN_DELAY_SEC, DISCOVER_IG_MAX_DELAY_SEC)
-    hi = max(DISCOVER_IG_MIN_DELAY_SEC, DISCOVER_IG_MAX_DELAY_SEC)
-    delay = random.uniform(lo, hi)
-    now = time.monotonic()
-    wait = (_LAST_IG_CALL_AT + delay) - now
-    if wait > 0:
-        time.sleep(wait)
-
-
-def _mark_ig_call() -> None:
-    global _LAST_IG_CALL_AT
-    _LAST_IG_CALL_AT = time.monotonic()
 
 
 def _extract_token(html: str, patterns: list[str]) -> Optional[str]:
@@ -147,9 +125,6 @@ def _bootstrap_tokens(client: httpx.Client, query: str) -> dict[str, str]:
 def _client() -> httpx.Client:
     csrf_env = (os.getenv("INSTAGRAM_CSRFTOKEN") or "").strip()
     headers = {
-        "User-Agent": _USER_AGENT,
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
         "Origin": "https://www.instagram.com",
         "Referer": "https://www.instagram.com/",
         "Cookie": _cookie_header(),
@@ -161,7 +136,7 @@ def _client() -> httpx.Client:
     }
     if csrf_env:
         headers["X-CSRFToken"] = csrf_env
-    return httpx.Client(follow_redirects=True, timeout=45.0, headers=headers)
+    return httpx_client(timeout=45.0, headers=headers)
 
 
 def _is_reel(item: dict[str, Any]) -> bool:
@@ -259,8 +234,8 @@ def search_keyword(query: str) -> list[dict[str, Any]]:
         "serp_session_id": session_uuid,
     }
 
-    with _IG_LOCK:
-        _wait_before_ig_call()
+    with _IG_LIMITER.lock:
+        _IG_LIMITER.wait()
         try:
             with _client() as client:
                 tokens = _bootstrap_tokens(client, q)
@@ -316,20 +291,16 @@ def search_keyword(query: str) -> list[dict[str, Any]]:
 
                 return parse_serp_media(payload, q)
         finally:
-            _mark_ig_call()
+            _IG_LIMITER.mark()
 
 
 def search_keyword_safe(query: str) -> tuple[list[dict[str, Any]], Optional[str]]:
     """Soft-fail wrapper: returns (reels, warning_or_None)."""
-    try:
-        return search_keyword(query), None
-    except Exception as exc:
-        log.warning("keyword search failed q=%r: %s", query, exc)
-        return [], f"instagram query={query!r}: {exc}"
+    return safe_search("instagram", search_keyword, query)
 
 
 def _match_url(url: str) -> bool:
-    from platforms import INSTAGRAM_URL_RE
+    from platforms.registry import INSTAGRAM_URL_RE
 
     return bool(INSTAGRAM_URL_RE.search((url or "").strip()))
 
