@@ -21,6 +21,10 @@ __pycache__/
 .gradio/
 downloads/
 backend/downloads/
+backend/test_tt.mp4
+test_tt.mp4
+backend/tiktok_cookies.txt
+tiktok_cookies.txt
 
 # OS / editor
 .DS_Store
