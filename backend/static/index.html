@@ -348,16 +348,10 @@
 
     <section id="panel-discover" class="panel">
       <h2>Website → Reel Discover</h2>
-      <p class="lead">Paste a business landing page URL. Scrapes the site, generates keyword queries, searches selected platforms, ranks by engagement + recency.</p>
+      <p class="lead">Paste a business landing page URL. Scrapes the site, generates keyword queries, searches Instagram and TikTok, ranks by engagement + recency.</p>
 
       <label for="siteUrl">Website URL</label>
       <input id="siteUrl" type="url" placeholder="https://example.com/" />
-
-      <label>Platforms</label>
-      <div class="platform-picks" id="platformPicks">
-        <label><input type="checkbox" name="platform" value="instagram" checked /> Instagram</label>
-        <label><input type="checkbox" name="platform" value="tiktok" /> TikTok</label>
-      </div>
 
       <div class="row">
         <button id="discoverGo" type="button">Discover</button>
@@ -830,21 +824,10 @@
       }
     };
 
-    function selectedPlatforms() {
-      return Array.from(
-        document.querySelectorAll('input[name="platform"]:checked')
-      ).map((el) => el.value);
-    }
-
     $("discoverGo").onclick = async () => {
       const url = $("siteUrl").value.trim();
       if (!url) {
         alert("Paste a website URL");
-        return;
-      }
-      const platforms = selectedPlatforms();
-      if (!platforms.length) {
-        alert("Select at least one platform");
         return;
       }
       $("discoverGo").disabled = true;
@@ -855,7 +838,7 @@
         const res = await fetch("/v1/discover/analyze", {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify({ url, platforms }),
+          body: JSON.stringify({ url }),
         });
         const accepted = await res.json();
         if (!res.ok) throw new Error(accepted.detail || res.statusText);
@@ -873,32 +856,6 @@
       }
     };
 
-    (async () => {
-      try {
-        const res = await fetch("/v1/discover/platforms", { headers: headers() });
-        if (!res.ok) return;
-        const data = await res.json();
-        const list = data.platforms || [];
-        if (!list.length) return;
-        const wrap = $("platformPicks");
-        const selected = new Set(selectedPlatforms());
-        if (!selected.size) selected.add("instagram");
-        wrap.innerHTML = "";
-        list.forEach((p) => {
-          const label = document.createElement("label");
-          const input = document.createElement("input");
-          input.type = "checkbox";
-          input.name = "platform";
-          input.value = p.name;
-          input.checked = selected.has(p.name) || (p.name === "instagram" && !selected.size);
-          label.appendChild(input);
-          label.appendChild(document.createTextNode(" " + (p.label || p.name)));
-          wrap.appendChild(label);
-        });
-      } catch (_) {
-        /* keep static checkboxes */
-      }
-    })();
   </script>
 </body>
 </html>

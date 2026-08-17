@@ -68,10 +68,10 @@ def get_search(name: str) -> SearchFn:
 
 
 def validate_platforms(platforms: Optional[list[str]]) -> list[str]:
-    """Normalize + validate; default Instagram for backward compatibility."""
+    """Normalize + validate; omit/empty → every registered platform (IG + TikTok)."""
     ensure_loaded()
     if platforms is None or len(platforms) == 0:
-        return ["instagram"]
+        return known_platforms()
     cleaned: list[str] = []
     seen: set[str] = set()
     unknown: list[str] = []
@@ -90,7 +90,7 @@ def validate_platforms(platforms: Optional[list[str]]) -> list[str]:
         bad = ", ".join(unknown)
         raise ValueError(f"Unknown platforms: {bad}. Allowed: {allowed}")
     if not cleaned:
-        return ["instagram"]
+        return known_platforms()
     return cleaned
 
 

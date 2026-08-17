@@ -25,6 +25,7 @@ backend/test_tt.mp4
 test_tt.mp4
 backend/tiktok_cookies.txt
 tiktok_cookies.txt
+dev/
 
 # OS / editor
 .DS_Store

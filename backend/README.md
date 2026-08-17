@@ -3,7 +3,7 @@
 FastAPI service with two pipelines:
 
 1. **Hooks** — download an Instagram or TikTok video, Whisper transcript, shot cuts, **Amazon Nova 2 Lite** (hook verdict + `whoWatched` / `whyWatched`), and `cost_usd`.
-2. **Discover** — scrape a business landing page (Firecrawl when configured), LLM keyword queries, multi-platform search (`platforms[]`), top-N reels by engagement + recency.
+2. **Discover** — scrape a business landing page (Firecrawl when configured), LLM keyword queries, Instagram + TikTok search, top-N reels by engagement + recency.
 
 ## Layout
 
@@ -45,7 +45,7 @@ CLI (optional): `python -m hooks.pipeline <instagram_or_tiktok_url>`
 | `GET` | `/v1/hooks/jobs/{job_id}` | Job status + result (`nova_hook`, `whoWatched`, `whyWatched`) / error / cost |
 | `GET` | `/v1/hooks/jobs/{job_id}/video` | Downloaded MP4 (use `?api_key=` if `API_KEY` set) |
 | `GET` | `/v1/discover/platforms` | `{ "platforms": [{ "name", "label" }, ...] }` |
-| `POST` | `/v1/discover/analyze` | Body `{ "url": "<website>", "platforms": ["instagram","tiktok"] }` — omit `platforms` → `["instagram"]` |
+| `POST` | `/v1/discover/analyze` | Body `{ "url": "<website>" }` — always searches Instagram and TikTok |
 | `GET` | `/v1/discover/jobs/{job_id}` | Tags, queries, ranked reels (each with `platform`), warnings, LLM cost |
 | `GET` | `/dev/` | **Developer UI only** (when `DEV_UI=1`) — hooks + discover tabs |
 

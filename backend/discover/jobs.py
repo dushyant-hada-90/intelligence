@@ -19,7 +19,7 @@ log = logging.getLogger("discover-jobs")
 class DiscoverJob:
     job_id: str
     url: str
-    platforms: list[str] = field(default_factory=lambda: ["instagram"])
+    platforms: list[str] = field(default_factory=lambda: ["instagram", "tiktok"])
     status: str = "queued"  # queued | running | completed | failed
     created_at: str = field(default_factory=utc_now)
     started_at: Optional[str] = None

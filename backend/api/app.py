@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from config.env import BACKEND_DIR  # loads .env
 from discover.jobs import discover_manager
 from hooks.jobs import manager
-from platforms import platform_specs, validate_platforms
+from platforms import platform_specs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("hook-api")
@@ -63,10 +63,6 @@ class AnalyzeRequest(BaseModel):
 
 class DiscoverRequest(BaseModel):
     url: str = Field(..., description="Business landing page URL")
-    platforms: Optional[list[str]] = Field(
-        default=None,
-        description='Platforms to scrape, e.g. ["instagram","tiktok"]. Default: ["instagram"].',
-    )
 
 
 class AnalyzeAccepted(BaseModel):
@@ -166,11 +162,7 @@ def analyze_discover(
     body: DiscoverRequest, _: None = Depends(require_api_key)
 ) -> AnalyzeAccepted:
     try:
-        platforms = validate_platforms(body.platforms)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    try:
-        job = discover_manager.submit(body.url, platforms=platforms)
+        job = discover_manager.submit(body.url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
